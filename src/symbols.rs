@@ -3,39 +3,60 @@ use std::fs;
 use std::path::Path;
 use syn::{File, Item};
 
-/// Extract the names of all top-level items defined in a Rust source file.
-///
-/// This is v0.1 MVP precision: any change to the file is assumed to affect
-/// every top-level item defined within. Span-accurate hunk-to-item mapping
-/// arrives in v0.2.
-pub fn top_level_symbol_names(file: &Path) -> Result<Vec<String>> {
-    let src = fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
-    let ast: File = syn::parse_file(&src).with_context(|| format!("parsing {}", file.display()))?;
-    let mut names = Vec::new();
-    collect_item_names(&ast.items, &mut names);
-    Ok(names)
+/// Categorization of a top-level Rust item. Trait ripple and dyn-dispatch
+/// analysis filter on this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolKind {
+    Fn,
+    Struct,
+    Enum,
+    Trait,
+    Const,
+    Static,
+    TypeAlias,
+    Union,
+    Mod,
 }
 
-fn collect_item_names(items: &[Item], out: &mut Vec<String>) {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopLevelSymbol {
+    pub name: String,
+    pub kind: SymbolKind,
+}
+
+/// Extract every top-level item from a Rust source file, tagged with its kind.
+///
+/// v0.2 precision remains file-level: any change to the file is assumed to
+/// affect every item defined within. Span-accurate hunk mapping arrives later.
+pub fn top_level_symbols(file: &Path) -> Result<Vec<TopLevelSymbol>> {
+    let src = fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let ast: File = syn::parse_file(&src).with_context(|| format!("parsing {}", file.display()))?;
+    let mut out = Vec::new();
+    collect_items(&ast.items, &mut out);
+    Ok(out)
+}
+
+fn collect_items(items: &[Item], out: &mut Vec<TopLevelSymbol>) {
     for item in items {
-        match item {
-            Item::Fn(f) => out.push(f.sig.ident.to_string()),
-            Item::Struct(s) => out.push(s.ident.to_string()),
-            Item::Enum(e) => out.push(e.ident.to_string()),
-            Item::Trait(t) => out.push(t.ident.to_string()),
-            Item::Const(c) => out.push(c.ident.to_string()),
-            Item::Static(s) => out.push(s.ident.to_string()),
-            Item::Type(t) => out.push(t.ident.to_string()),
-            Item::Union(u) => out.push(u.ident.to_string()),
+        let sym = match item {
+            Item::Fn(f) => Some((f.sig.ident.to_string(), SymbolKind::Fn)),
+            Item::Struct(s) => Some((s.ident.to_string(), SymbolKind::Struct)),
+            Item::Enum(e) => Some((e.ident.to_string(), SymbolKind::Enum)),
+            Item::Trait(t) => Some((t.ident.to_string(), SymbolKind::Trait)),
+            Item::Const(c) => Some((c.ident.to_string(), SymbolKind::Const)),
+            Item::Static(s) => Some((s.ident.to_string(), SymbolKind::Static)),
+            Item::Type(t) => Some((t.ident.to_string(), SymbolKind::TypeAlias)),
+            Item::Union(u) => Some((u.ident.to_string(), SymbolKind::Union)),
             Item::Mod(m) => {
-                out.push(m.ident.to_string());
                 if let Some((_, inner)) = &m.content {
-                    collect_item_names(inner, out);
+                    collect_items(inner, out);
                 }
+                Some((m.ident.to_string(), SymbolKind::Mod))
             }
-            // impl blocks, use statements, extern blocks, and macros don't
-            // introduce a single named symbol we can track here.
-            _ => {}
+            _ => None,
+        };
+        if let Some((name, kind)) = sym {
+            out.push(TopLevelSymbol { name, kind });
         }
     }
 }
@@ -55,27 +76,28 @@ mod tests {
     }
 
     #[test]
-    fn extracts_top_level_fn_struct_enum_trait() {
+    fn tags_each_item_with_kind() {
         let f = write_temp(
             "pub fn foo() {}\n\
              struct Bar;\n\
              enum Baz { A, B }\n\
              trait Quux {}\n",
         );
-        let names = top_level_symbol_names(f.path()).unwrap();
-        for expected in ["foo", "Bar", "Baz", "Quux"] {
-            assert!(
-                names.iter().any(|n| n == expected),
-                "missing {expected} in {names:?}"
-            );
-        }
+        let syms = top_level_symbols(f.path()).unwrap();
+        let by_name: std::collections::HashMap<_, _> =
+            syms.iter().map(|s| (s.name.as_str(), s.kind)).collect();
+        assert_eq!(by_name["foo"], SymbolKind::Fn);
+        assert_eq!(by_name["Bar"], SymbolKind::Struct);
+        assert_eq!(by_name["Baz"], SymbolKind::Enum);
+        assert_eq!(by_name["Quux"], SymbolKind::Trait);
     }
 
     #[test]
     fn descends_into_inline_modules() {
         let f =
             write_temp("mod outer {\n    pub fn inner_fn() {}\n    pub struct InnerStruct;\n}\n");
-        let names = top_level_symbol_names(f.path()).unwrap();
+        let syms = top_level_symbols(f.path()).unwrap();
+        let names: Vec<_> = syms.iter().map(|s| s.name.clone()).collect();
         assert!(names.iter().any(|n| n == "outer"));
         assert!(names.iter().any(|n| n == "inner_fn"));
         assert!(names.iter().any(|n| n == "InnerStruct"));
@@ -84,7 +106,7 @@ mod tests {
     #[test]
     fn rejects_unparseable_source() {
         let f = write_temp("this is not valid rust !!!");
-        let err = top_level_symbol_names(f.path()).unwrap_err();
+        let err = top_level_symbols(f.path()).unwrap_err();
         assert!(format!("{err:#}").contains("parsing"));
     }
 }

@@ -1,44 +1,32 @@
+use crate::finding::{Finding, FindingKind, Location, Tier};
 use anyhow::Result;
 use quote::ToTokens;
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
+use std::path::Path;
 use syn::visit::Visit;
 use syn::{Attribute, ItemFn};
 use walkdir::{DirEntry, WalkDir};
 
-/// A test function that references at least one of the changed symbols.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct AffectedTest {
-    /// Test function name (the leaf identifier, not the fully-qualified path).
-    pub name: String,
-    /// Source file containing the test, relative to the repository root.
-    pub file: PathBuf,
-    /// The subset of changed symbols this test body references.
-    pub matched_symbols: Vec<String>,
-}
-
-/// Scan `root` for test functions whose body references any of
-/// `changed_symbols`. Files that fail to parse as Rust are skipped silently —
-/// the scan is best-effort and must not fail the whole run.
+/// Scan `root` for test functions whose body references any changed symbol.
+/// Returns findings without IDs — the orchestrator assigns final IDs after
+/// aggregating all analyzers.
+///
+/// Confidence tier is `Likely` (0.85) rather than `Proven`: without resolved
+/// name lookup (rust-analyzer integration lands in v0.3) we cannot distinguish
+/// a real call from a shadowed identifier, so perfectly honest syn-only
+/// analysis tops out at this tier.
 pub fn find_affected_tests(
     root: &Path,
     changed_symbols: &BTreeSet<String>,
-) -> Result<Vec<AffectedTest>> {
+) -> Result<Vec<Finding>> {
     if changed_symbols.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut hits: BTreeMap<(PathBuf, String), BTreeSet<String>> = BTreeMap::new();
+    let mut findings = Vec::new();
 
-    let walker = WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|e| !is_skippable(e));
-
-    for entry in walker.filter_map(std::result::Result::ok) {
+    for entry in workspace_rust_files(root) {
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("rs") {
-            continue;
-        }
         let Ok(src) = std::fs::read_to_string(path) else {
             continue;
         };
@@ -53,28 +41,44 @@ pub fn find_affected_tests(
         visitor.visit_file(&ast);
 
         let rel = path.strip_prefix(root).unwrap_or(path).to_path_buf();
-        for (name, matched) in visitor.hits {
-            hits.entry((rel.clone(), name)).or_default().extend(matched);
+        for (test_name, matched) in visitor.hits {
+            let matched_vec: Vec<String> = matched.into_iter().collect();
+            let evidence = format!(
+                "test body references {} (syntactic match, no name resolution)",
+                matched_vec.join(", ")
+            );
+            let kind = FindingKind::TestReference {
+                test: Location {
+                    file: rel.clone(),
+                    symbol: test_name.clone(),
+                },
+                matched_symbols: matched_vec,
+            };
+            findings.push(
+                Finding::new("", Tier::Likely, 0.85, kind, evidence)
+                    .with_suggested_action(format!("cargo nextest run -E 'test({test_name})'")),
+            );
         }
     }
 
-    Ok(hits
+    Ok(findings)
+}
+
+/// Shared workspace iterator used by every analyzer. Yields `.rs` files under
+/// `root`, skipping `target/` and hidden directories (`.git`, `.github`).
+pub(crate) fn workspace_rust_files(root: &Path) -> impl Iterator<Item = DirEntry> {
+    WalkDir::new(root)
         .into_iter()
-        .map(|((file, name), matched)| AffectedTest {
-            name,
-            file,
-            matched_symbols: matched.into_iter().collect(),
-        })
-        .collect())
+        .filter_entry(|e| !is_skippable(e))
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("rs"))
 }
 
 fn is_skippable(entry: &DirEntry) -> bool {
-    // Always descend into the starting directory itself.
     if entry.depth() == 0 {
         return false;
     }
     let name = entry.file_name().to_string_lossy();
-    // Hidden directories (`.git`, `.github`) and the cargo `target` dir.
     (name.starts_with('.') && entry.file_type().is_dir()) || name == "target"
 }
 
@@ -97,14 +101,10 @@ impl<'ast> Visit<'ast> for TestVisitor<'_> {
                 self.hits.push((f.sig.ident.to_string(), matched));
             }
         }
-        // Still recurse so nested `mod tests { #[test] fn ... }` is visited.
         syn::visit::visit_item_fn(self, f);
     }
 }
 
-/// True if any attribute on the function marks it as a test. Uses the last
-/// path segment so `#[test]`, `#[tokio::test]`, `#[rstest]`, `#[test_case(...)]`,
-/// and `#[bench]` all qualify without enumerating every framework.
 fn is_test_fn(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|a| {
         a.path()
@@ -115,9 +115,9 @@ fn is_test_fn(attrs: &[Attribute]) -> bool {
     })
 }
 
-/// Word-boundary identifier search against a `quote`-produced token string.
-/// The haystack has whitespace between every token, so splitting on
-/// non-word characters is reliable — `"user"` won't match `"user_profile"`.
+/// Word-boundary identifier search. Relies on `quote`'s token-stream producing
+/// whitespace between adjacent tokens, so splitting on non-word characters is
+/// reliable — `"user"` never matches `"user_profile"`.
 fn tokens_contain_ident(haystack: &str, needle: &str) -> bool {
     haystack
         .split(|c: char| !c.is_alphanumeric() && c != '_')
@@ -140,6 +140,10 @@ mod tests {
         dir
     }
 
+    fn symbols(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| (*s).to_string()).collect()
+    }
+
     #[test]
     fn matches_test_that_references_changed_symbol() {
         let dir = setup(&[(
@@ -151,23 +155,30 @@ mod tests {
                 }
             "#,
         )]);
-        let changed: BTreeSet<String> = ["login"].iter().map(|s| s.to_string()).collect();
-        let hits = find_affected_tests(dir.path(), &changed).unwrap();
+        let hits = find_affected_tests(dir.path(), &symbols(&["login"])).unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].name, "smoke");
-        assert_eq!(hits[0].matched_symbols, vec!["login"]);
+        assert_eq!(hits[0].tier, Tier::Likely);
+        assert_eq!(hits[0].confidence, 0.85);
+        match &hits[0].kind {
+            FindingKind::TestReference {
+                test,
+                matched_symbols,
+            } => {
+                assert_eq!(test.symbol, "smoke");
+                assert_eq!(matched_symbols, &vec!["login".to_string()]);
+            }
+            other => panic!("expected TestReference, got {other:?}"),
+        }
+        assert!(hits[0]
+            .suggested_action
+            .as_deref()
+            .is_some_and(|s| s.contains("test(smoke)")));
     }
 
     #[test]
     fn ignores_non_test_functions() {
-        let dir = setup(&[(
-            "src/lib.rs",
-            r#"
-                fn helper() { let _ = login(); }
-            "#,
-        )]);
-        let changed: BTreeSet<String> = ["login"].iter().map(|s| s.to_string()).collect();
-        let hits = find_affected_tests(dir.path(), &changed).unwrap();
+        let dir = setup(&[("src/lib.rs", "fn helper() { let _ = login(); }")]);
+        let hits = find_affected_tests(dir.path(), &symbols(&["login"])).unwrap();
         assert!(hits.is_empty());
     }
 
@@ -183,24 +194,25 @@ mod tests {
                 fn parametrized(#[case] _x: u32) { let _ = login; }
             "#,
         )]);
-        let changed: BTreeSet<String> = ["login"].iter().map(|s| s.to_string()).collect();
-        let hits = find_affected_tests(dir.path(), &changed).unwrap();
-        let names: Vec<_> = hits.iter().map(|h| h.name.as_str()).collect();
-        assert!(names.contains(&"async_smoke"));
-        assert!(names.contains(&"parametrized"));
+        let hits = find_affected_tests(dir.path(), &symbols(&["login"])).unwrap();
+        let names: Vec<_> = hits
+            .iter()
+            .map(|h| match &h.kind {
+                FindingKind::TestReference { test, .. } => test.symbol.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        assert!(names.contains(&"async_smoke".to_string()));
+        assert!(names.contains(&"parametrized".to_string()));
     }
 
     #[test]
     fn does_not_match_substring_identifiers() {
         let dir = setup(&[(
             "tests/false_positive.rs",
-            r#"
-                #[test]
-                fn t() { let login_helper = 1; let _ = login_helper; }
-            "#,
+            "#[test] fn t() { let login_helper = 1; let _ = login_helper; }",
         )]);
-        let changed: BTreeSet<String> = ["login"].iter().map(|s| s.to_string()).collect();
-        let hits = find_affected_tests(dir.path(), &changed).unwrap();
+        let hits = find_affected_tests(dir.path(), &symbols(&["login"])).unwrap();
         assert!(hits.is_empty(), "unexpected hits: {hits:?}");
     }
 
@@ -224,9 +236,14 @@ mod tests {
             ),
             ("tests/real.rs", "#[test] fn real() { let _ = login(); }"),
         ]);
-        let changed: BTreeSet<String> = ["login"].iter().map(|s| s.to_string()).collect();
-        let hits = find_affected_tests(dir.path(), &changed).unwrap();
-        let names: Vec<_> = hits.iter().map(|h| h.name.as_str()).collect();
-        assert_eq!(names, vec!["real"]);
+        let hits = find_affected_tests(dir.path(), &symbols(&["login"])).unwrap();
+        let names: Vec<_> = hits
+            .iter()
+            .map(|h| match &h.kind {
+                FindingKind::TestReference { test, .. } => test.symbol.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        assert_eq!(names, vec!["real".to_string()]);
     }
 }

@@ -1,0 +1,263 @@
+//! Core finding types.
+//!
+//! A [`Finding`] is the unit of output: one thing the developer should verify.
+//! Each one carries a confidence tier ([`Tier`]), a numeric score, a severity
+//! class ([`SeverityClass`]), and a `kind`-specific payload explaining why it
+//! was flagged. Serialized identically whether emitted as JSON or rendered
+//! into the markdown/text reports.
+
+use serde::Serialize;
+use std::path::PathBuf;
+
+/// Confidence tier per README §3F.
+///
+/// v0.2 ships without resolved call-graph analysis (rust-analyzer integration
+/// arrives in v0.3), so no finding reaches `Proven` in this release — syn-only
+/// analysis is honestly at most `Likely`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tier {
+    Proven,
+    Likely,
+    Possible,
+    Unknown,
+}
+
+impl Tier {
+    /// Rank for filtering (`--confidence-min` clamps by score; this is used
+    /// only for stable ordering).
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Proven => 3,
+            Self::Likely => 2,
+            Self::Possible => 1,
+            Self::Unknown => 0,
+        }
+    }
+}
+
+/// Severity bucket used for `--fail-on` and human-facing grouping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SeverityClass {
+    High,
+    Medium,
+    Low,
+    Unknown,
+}
+
+impl SeverityClass {
+    pub fn as_label(self) -> &'static str {
+        match self {
+            Self::High => "HIGH",
+            Self::Medium => "MEDIUM",
+            Self::Low => "LOW",
+            Self::Unknown => "UNKNOWN",
+        }
+    }
+
+    /// Emoji column used in text/markdown. Matches README §4.
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::High => "🔴",
+            Self::Medium => "🟡",
+            Self::Low => "🔵",
+            Self::Unknown => "⚪",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Location {
+    pub file: PathBuf,
+    pub symbol: String,
+}
+
+/// Reason a specific finding was emitted. Variants carry the analysis-kind
+/// payload; cross-cutting fields (tier, confidence, severity) live on
+/// [`Finding`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FindingKind {
+    /// A test function whose body syntactically references a changed symbol.
+    TestReference {
+        test: Location,
+        matched_symbols: Vec<String>,
+    },
+    /// An `impl TraitName for T` block in the workspace where `TraitName`
+    /// was defined in a changed file.
+    TraitImpl {
+        trait_name: String,
+        impl_for: String,
+        impl_site: Location,
+    },
+    /// A `dyn TraitName` type reference for a trait whose definition changed.
+    DynDispatch { trait_name: String, site: Location },
+    /// An intra-doc link like `[`Symbol`]` in a markdown file or `///` comment
+    /// referencing a changed symbol.
+    DocDriftLink {
+        symbol: String,
+        doc: Location,
+        line: u32,
+    },
+    /// A plain identifier match inside a doc comment or markdown file — weaker
+    /// signal than an intra-doc link, emitted at `Possible` tier only.
+    DocDriftKeyword {
+        symbol: String,
+        doc: Location,
+        line: u32,
+    },
+}
+
+impl FindingKind {
+    /// Default severity for this kind — callers can override but rarely need to.
+    pub fn default_severity(&self) -> SeverityClass {
+        match self {
+            Self::TraitImpl { .. } => SeverityClass::High,
+            Self::TestReference { .. } | Self::DynDispatch { .. } => SeverityClass::Medium,
+            Self::DocDriftLink { .. } | Self::DocDriftKeyword { .. } => SeverityClass::Low,
+        }
+    }
+
+    /// Tag used for sorting/grouping and the JSON `kind` field's value.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::TestReference { .. } => "test_reference",
+            Self::TraitImpl { .. } => "trait_impl",
+            Self::DynDispatch { .. } => "dyn_dispatch",
+            Self::DocDriftLink { .. } => "doc_drift_link",
+            Self::DocDriftKeyword { .. } => "doc_drift_keyword",
+        }
+    }
+}
+
+/// Single unit of analysis output.
+///
+/// Construct via [`Finding::new`] so the severity/tier/confidence invariants
+/// are enforced (confidence clamped to [0, 1]; severity default derived from
+/// the kind unless overridden).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Finding {
+    pub id: String,
+    pub severity: SeverityClass,
+    pub tier: Tier,
+    pub confidence: f64,
+    #[serde(flatten)]
+    pub kind: FindingKind,
+    pub evidence: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_action: Option<String>,
+}
+
+impl Eq for Finding {}
+
+impl Finding {
+    pub fn new(
+        id: impl Into<String>,
+        tier: Tier,
+        confidence: f64,
+        kind: FindingKind,
+        evidence: impl Into<String>,
+    ) -> Self {
+        let severity = kind.default_severity();
+        Self {
+            id: id.into(),
+            severity,
+            tier,
+            confidence: confidence.clamp(0.0, 1.0),
+            kind,
+            evidence: evidence.into(),
+            suggested_action: None,
+        }
+    }
+
+    pub fn with_severity(mut self, severity: SeverityClass) -> Self {
+        self.severity = severity;
+        self
+    }
+
+    pub fn with_suggested_action(mut self, action: impl Into<String>) -> Self {
+        self.suggested_action = Some(action.into());
+        self
+    }
+}
+
+/// Counts by tier — exposed in the JSON envelope and the text footer.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TierSummary {
+    pub proven: u32,
+    pub likely: u32,
+    pub possible: u32,
+    pub unknown: u32,
+}
+
+impl TierSummary {
+    pub fn from_findings(findings: &[Finding]) -> Self {
+        let mut s = Self::default();
+        for f in findings {
+            match f.tier {
+                Tier::Proven => s.proven += 1,
+                Tier::Likely => s.likely += 1,
+                Tier::Possible => s.possible += 1,
+                Tier::Unknown => s.unknown += 1,
+            }
+        }
+        s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_kind() -> FindingKind {
+        FindingKind::TestReference {
+            test: Location {
+                file: PathBuf::from("tests/t.rs"),
+                symbol: "smoke".into(),
+            },
+            matched_symbols: vec!["login".into()],
+        }
+    }
+
+    #[test]
+    fn confidence_clamped_to_unit_interval() {
+        let f = Finding::new("f-0001", Tier::Likely, 1.5, sample_kind(), "e");
+        assert_eq!(f.confidence, 1.0);
+        let f = Finding::new("f-0001", Tier::Likely, -0.5, sample_kind(), "e");
+        assert_eq!(f.confidence, 0.0);
+    }
+
+    #[test]
+    fn default_severity_by_kind() {
+        let f = Finding::new("x", Tier::Likely, 0.5, sample_kind(), "e");
+        assert_eq!(f.severity, SeverityClass::Medium);
+    }
+
+    #[test]
+    fn tier_summary_tallies_correctly() {
+        let mk = |tier: Tier, id: &str| Finding::new(id, tier, 0.5, sample_kind(), "e");
+        let findings = vec![
+            mk(Tier::Likely, "a"),
+            mk(Tier::Likely, "b"),
+            mk(Tier::Possible, "c"),
+            mk(Tier::Unknown, "d"),
+        ];
+        let s = TierSummary::from_findings(&findings);
+        assert_eq!(s.proven, 0);
+        assert_eq!(s.likely, 2);
+        assert_eq!(s.possible, 1);
+        assert_eq!(s.unknown, 1);
+    }
+
+    #[test]
+    fn json_shape_uses_kind_tag() {
+        let f = Finding::new("f-0001", Tier::Likely, 0.85, sample_kind(), "direct ref");
+        let v: serde_json::Value = serde_json::to_value(&f).unwrap();
+        assert_eq!(v["kind"], "test_reference");
+        assert_eq!(v["tier"], "likely");
+        assert_eq!(v["severity"], "medium");
+        assert_eq!(v["confidence"], 0.85);
+        assert!(v["test"].is_object());
+    }
+}

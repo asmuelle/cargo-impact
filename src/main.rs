@@ -5,8 +5,8 @@ use clap::Parser;
 fn main() -> Result<()> {
     // When invoked as a cargo subcommand, cargo execs us with
     // argv = ["cargo-impact", "impact", ...rest]. Strip the duplicate
-    // "impact" token so clap sees a single clean arg list. When invoked
-    // directly as `./cargo-impact ...`, there is no token to strip.
+    // "impact" token so clap sees a clean arg list. When invoked directly
+    // as `./cargo-impact ...`, there is no token to strip.
     let args: Vec<std::ffi::OsString> = std::env::args_os()
         .enumerate()
         .filter_map(|(i, a)| {
@@ -18,5 +18,6 @@ fn main() -> Result<()> {
         })
         .collect();
     let parsed = ImpactArgs::parse_from(args);
-    run(&parsed)
+    let code = run(&parsed)?;
+    std::process::exit(code);
 }
