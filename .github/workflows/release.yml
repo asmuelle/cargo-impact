@@ -56,7 +56,7 @@ jobs:
           archive="cargo-impact-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "dist/$archive"
           cp "target/${{ matrix.target }}/release/$bin" "dist/$archive/"
-          cp README.md LICENSE "dist/$archive/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "dist/$archive/"
           cd dist
           if [[ "${{ matrix.target }}" == *windows* ]]; then
             7z a "$archive.zip" "$archive"
