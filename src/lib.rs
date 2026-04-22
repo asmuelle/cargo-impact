@@ -43,6 +43,7 @@ pub mod finding;
 pub mod format;
 mod git;
 mod nextest;
+mod semver_checks;
 mod symbols;
 mod tests_scan;
 mod traits;
@@ -88,6 +89,14 @@ pub struct ImpactArgs {
     /// findings; `medium` gates on medium+high; `low` gates on any non-unknown.
     #[arg(long, value_enum)]
     pub fail_on: Option<FailOn>,
+
+    /// Opt in to public-API breakage detection via `cargo-semver-checks`.
+    /// Off by default because the underlying tool builds rustdoc JSON twice
+    /// and typically takes 10–30 seconds. Requires `cargo-semver-checks` on
+    /// `PATH`; if absent, a stderr warning is printed and the check is
+    /// skipped (non-fatal).
+    #[arg(long)]
+    pub semver_checks: bool,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -210,6 +219,12 @@ pub fn run(args: &ImpactArgs) -> Result<i32> {
             let kind = FindingKind::BuildScriptChanged { file: rel.clone() };
             findings.push(Finding::new("", Tier::Likely, 0.90, kind, evidence));
         }
+    }
+
+    // Opt-in public-API breakage analysis via cargo-semver-checks.
+    match semver_checks::run(&root, &args.since, args.semver_checks) {
+        Ok(hits) => findings.extend(hits),
+        Err(e) => eprintln!("cargo-impact: semver-checks failed: {e:#}"),
     }
 
     // Filter by confidence before assigning IDs so IDs are stable for the

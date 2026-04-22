@@ -255,6 +255,9 @@ fn finding_summary(f: &Finding) -> String {
         FindingKind::BuildScriptChanged { file } => {
             format!("`build.rs` changed ({})", file.display())
         }
+        FindingKind::SemverCheck { level, .. } => {
+            format!("cargo-semver-checks reports `{level}` public-API change")
+        }
     }
 }
 

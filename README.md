@@ -1,8 +1,13 @@
 # cargo-impact
 *Predictive Regression Analysis & Verification Mapping for Rust*
 
-> **Status:** Spec v0.2 · Implementation not started · Seeking feedback and contributors.
-> This document is a design spec, not a shipped tool. See §11 for the roadmap.
+[![CI](https://github.com/asmuelle/cargo-impact/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/asmuelle/cargo-impact/actions/workflows/ci.yml)
+[![Security](https://github.com/asmuelle/cargo-impact/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/asmuelle/cargo-impact/actions/workflows/security.yml)
+[![Spec](https://github.com/asmuelle/cargo-impact/actions/workflows/spec.yml/badge.svg?branch=main)](https://github.com/asmuelle/cargo-impact/actions/workflows/spec.yml)
+[![Release](https://github.com/asmuelle/cargo-impact/actions/workflows/release.yml/badge.svg)](https://github.com/asmuelle/cargo-impact/actions/workflows/release.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
+> **Status:** v0.2.0 (alpha). Core analyzer is live; several roadmap items remain in flight. This README is both the living design spec and the user manual for the shipping tool — sections that describe yet-unshipped behavior are explicitly called out (see §11 for the roadmap).
 
 ## Contents
 
@@ -459,34 +464,33 @@ If an existing tool solves a subproblem well, we orchestrate it. If we find ours
 
 The spec is deliberately ambitious. These milestones are the cut points where the tool is genuinely useful to a real user, not a lab demo. Each milestone ships independently.
 
-### v0.1 — "Surgical test filter" (the MVP)
+### v0.1 — "Surgical test filter" (the MVP) ✅ shipped
 **Goal:** A Rust developer saves time on `cargo test` today, with zero AI integration.
 
-*   `cargo impact` parses `git diff` with `syn` → candidate symbols
-*   `rust-analyzer` (as library) resolves direct call-graph references
-*   Emits a `cargo-nextest` filter expression
-*   Human-readable text output, one severity column (no tiers yet)
-*   Honest cache: per-file, content-hash keyed
-*   **Shipped:** nothing below this line
+*   ✅ `cargo impact` parses `git diff` with `syn` → candidate symbols
+*   ⏭ `rust-analyzer` (as library) resolves direct call-graph references — deferred to v0.3; v0.2 uses syn-only token matching honestly tiered `Likely`
+*   ✅ Emits a `cargo-nextest` filter expression via `--test`
+*   ✅ Human-readable text output
 
 **Deliberately deferred:** macros, traits, features, MCP, framework adapters, confidence tiers, public-API analysis. If v0.1 isn't a 2-week project, we're over-engineering.
 
 **Success metric:** On the `ripgrep` workspace, typical edits trigger <10% of tests with zero false negatives across 50 seeded changes.
 
-### v0.2 — "Honest blast radius"
+### v0.2 — "Honest blast radius" (in progress — core shipped)
 **Goal:** The report earns the name. Confidence tiers, trait handling, and the first AI-consumable format.
 
-*   Macro expansion pass before analysis (`cargo expand` + HIR)
-*   Trait ripple differentiation (§3B): required vs. default vs. new method
-*   `dyn Trait` dispatch edges as `Likely`
-*   Confidence tiers (§3F) with numeric scores
-*   `--format=json` and `--format=markdown`
-*   `--features` / `--all-features`
-*   `cargo-semver-checks` integration for public API changes
-*   `--confidence-min` and `--fail-on=high` for CI
-*   Documentation drift via intra-doc links
+*   ⏳ Macro expansion pass before analysis (`cargo expand` + HIR) — still deferred; nightly toolchain boundary
+*   ⚠ Trait ripple differentiation (§3B): required vs. default vs. new method — blanket `Likely 0.80` shipping now; per-method classification deferred
+*   ✅ `dyn Trait` dispatch edges as `Likely 0.75`
+*   ✅ Confidence tiers (§3F) with numeric scores (`Proven` reserved for v0.3 RA integration)
+*   ✅ `--format=json` and `--format=markdown`
+*   ⏳ `--features` / `--all-features` still deferred (requires cfg-aware re-parse)
+*   ✅ `cargo-semver-checks` integration (opt-in via `--semver-checks`)
+*   ✅ `--confidence-min` and `--fail-on={high,medium,low}` for CI
+*   ✅ Documentation drift via intra-doc links (plus length-gated keyword fallback)
+*   ✅ Bonus: diff-aware candidate symbols (HEAD-vs-WT per-item comparison) + FFI signature tracking + `build.rs` change detection
 
-**Success metric:** On the cargo-impact repo itself, 95% of `Proven`-tier findings correspond to tests that actually fail when the finding is seeded as a regression.
+**Success metric:** On the cargo-impact repo itself, 95% of `Proven`-tier findings correspond to tests that actually fail when the finding is seeded as a regression. *(v0.2 emits no `Proven` findings — the metric re-activates once rust-analyzer integration lands in v0.3.)*
 
 ### v0.3 — "Agent-native"
 **Goal:** First-class AI integration. The tool is now consumed by agents, not just humans.

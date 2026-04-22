@@ -121,6 +121,12 @@ pub enum FindingKind {
     /// downstream compilation in non-obvious ways (env vars, rerun-if-*,
     /// generated code, linker flags).
     BuildScriptChanged { file: PathBuf },
+    /// Outcome of a `cargo-semver-checks` run. `level` is one of
+    /// `"breaking"` (the only currently-emitted value) or a finer-grained
+    /// classification in a future release. `details` carries the tool's
+    /// own output verbatim so consumers can surface it without a
+    /// re-invocation.
+    SemverCheck { level: String, details: String },
 }
 
 impl FindingKind {
@@ -132,6 +138,11 @@ impl FindingKind {
             | Self::BuildScriptChanged { .. } => SeverityClass::High,
             Self::TestReference { .. } | Self::DynDispatch { .. } => SeverityClass::Medium,
             Self::DocDriftLink { .. } | Self::DocDriftKeyword { .. } => SeverityClass::Low,
+            Self::SemverCheck { level, .. } => match level.as_str() {
+                "breaking" => SeverityClass::High,
+                "minor" | "patch" => SeverityClass::Medium,
+                _ => SeverityClass::Unknown,
+            },
         }
     }
 
@@ -145,6 +156,7 @@ impl FindingKind {
             Self::DocDriftKeyword { .. } => "doc_drift_keyword",
             Self::FfiSignatureChange { .. } => "ffi_signature_change",
             Self::BuildScriptChanged { .. } => "build_script_changed",
+            Self::SemverCheck { .. } => "semver_check",
         }
     }
 }
