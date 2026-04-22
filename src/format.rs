@@ -247,6 +247,14 @@ fn finding_summary(f: &Finding) -> String {
         FindingKind::DocDriftKeyword { symbol, doc, line } => {
             format!("`{symbol}` mentioned in {}:{line}", doc.file.display())
         }
+        FindingKind::FfiSignatureChange {
+            symbol,
+            file,
+            change,
+        } => format!("FFI `{symbol}` {change} in {}", file.display()),
+        FindingKind::BuildScriptChanged { file } => {
+            format!("`build.rs` changed ({})", file.display())
+        }
     }
 }
 

@@ -140,66 +140,124 @@ Every finding carries a tier. This replaces the fiction that static analysis is 
 
 ## 4. CLI Interface (UX)
 
+The flags and output described below reflect the shipping v0.2 surface. Flags for features still in flight (`--checklist`, `--context`, `--features`, `--feature-powerset`, `--format=mcp`) are called out in the roadmap (§11) and not listed here to avoid misrepresenting the current binary.
+
 ```bash
-# Analyze the current git diff and show the blast radius
+# Analyze the current working tree against HEAD
 cargo impact
 
-# Only run the tests that are likely affected (emits nextest filter)
+# Emit a cargo-nextest filter expression for affected tests only
 cargo impact --test
+# Example output: test(auth_roundtrip) + test(api_smoke)
 
-# Generate a machine-readable verification checklist for an AI agent
-cargo impact --checklist --format=markdown
-
-# Analyze a specific commit range
-cargo impact --since a1b2c3d
+# Analyze against a specific revision (branch, tag, SHA)
+cargo impact --since main
 
 # AI-consumable formats
-cargo impact --format=json              # structured risk graph
-cargo impact --format=markdown          # paste-to-AI
-cargo impact --format=mcp               # MCP tool-call envelope
-cargo impact --context                  # emit cargo-context pack of affected files
+cargo impact --format text       # default — severity-grouped text with emoji icons
+cargo impact --format markdown   # summary + per-severity sections + verification checklist
+cargo impact --format json       # structured envelope; stable schema for agents
 
-# Feature-aware analysis
-cargo impact --features="foo,bar"
-cargo impact --all-features
-cargo impact --feature-powerset         # expensive; CI only
-
-# Filtering
-cargo impact --confidence-min=0.6       # hide Possible / Unknown tiers
-cargo impact --fail-on=high             # CI: exit non-zero if HIGH findings exist
+# CI gating
+cargo impact --confidence-min 0.6   # hide Possible / Unknown findings
+cargo impact --fail-on high         # exit 1 if any HIGH finding is emitted
+cargo impact --fail-on medium       # exit 1 on HIGH or MEDIUM
 ```
 
-### The "Blast Radius" Report (Output)
-Each finding includes a **confidence tier** and **score**. Bucketed by severity × reach, not by a single "risk" axis:
+### Sample report (text)
 
-**🔴 HIGH — Breaking or compile-affecting**
-- `src/core/engine.rs` → `fn process_event()` *(modified)* · **Proven 1.00**
-- `src/models/user.rs` → `struct UserProfile` *(field added)* · **Proven 1.00** · semver: minor
-- `src/ffi.rs` → `extern "C" fn callback_t` *(signature changed)* · **Proven 1.00** · blast radius leaves Rust
+v0.2 is syn-only; no finding reaches the `Proven` tier — that is reserved for resolved call-graph analysis arriving with rust-analyzer in v0.3. Every score below is the *honest* ceiling for syntactic analysis.
 
-**🟡 MEDIUM — Runtime behavior likely affected**
-- `tests/integration_tests.rs::api_smoke` calls `process_event` · **Proven 0.98**
-- `GET /api/v1/user/profile` (axum handler, macro-expanded) depends on `UserProfile` · **Likely 0.82**
-- `crate-api-gateway` depends on `core` via re-export `core::engine::*` · **Likely 0.75**
-- `impl Handler for AuthMiddleware` via `dyn Handler` at `router.rs:42` · **Likely 0.68**
+```text
+cargo-impact v0.2.0
 
-**🔵 LOW — Peripheral / heuristic**
-- `docs/architecture.md` contains intra-doc link to `[\`process_event\`]` · **Proven 0.95** (doc drift)
-- `src/cli.rs` → `cmd sync` (keyword match only) · **Possible 0.40**
+Changed files (3):
+  src/engine.rs
+  src/ffi.rs
+  build.rs
 
-**⚪ UNKNOWN — Flagged, not scored**
-- `OnceCell<Config>` in `src/runtime.rs` initialized from changed path · manual review recommended
+Candidate symbols (4):
+  Greeter
+  callback_t
+  process_event
+  UserProfile
 
-### `--checklist` Output Shape
-Structured Markdown with `- [ ]` checkboxes an agent can tick, plus a JSON sibling for programmatic consumption:
+🔴 HIGH (3)
+  [f-0001] build.rs changed (build.rs) · Likely 0.90
+  [f-0002] FFI callback_t modified in src/ffi.rs · Likely 0.95
+  [f-0003] impl Greeter for Foo (src/engine.rs) · Likely 0.80
+
+🟡 MEDIUM (2)
+  [f-0004] test `api_smoke` (tests/integration.rs) references process_event · Likely 0.85
+  [f-0005] dyn Greeter used in src/dispatch.rs · Likely 0.75
+
+🔵 LOW (1)
+  [f-0006] intra-doc link to UserProfile in docs/architecture.md:42 · Likely 0.90
+
+⚪ UNKNOWN (0)
+```
+
+### Sample JSON envelope
+
+Stable across releases; matches the MCP tool-call schema (§8) so the CLI and the future MCP server return identical shapes.
+
+```json
+{
+  "version": "0.2.0",
+  "changed_files": ["src/engine.rs", "src/ffi.rs", "build.rs"],
+  "candidate_symbols": ["Greeter", "UserProfile", "callback_t", "process_event"],
+  "findings": [
+    {
+      "id": "f-0001",
+      "severity": "high",
+      "tier": "likely",
+      "confidence": 0.9,
+      "kind": "build_script_changed",
+      "file": "build.rs",
+      "evidence": "build script `build.rs` changed — build scripts can invalidate downstream compilation in non-obvious ways (…)"
+    },
+    {
+      "id": "f-0004",
+      "severity": "medium",
+      "tier": "likely",
+      "confidence": 0.85,
+      "kind": "test_reference",
+      "test": { "file": "tests/integration.rs", "symbol": "api_smoke" },
+      "matched_symbols": ["process_event"],
+      "evidence": "test body references process_event (syntactic match, no name resolution)",
+      "suggested_action": "cargo nextest run -E 'test(api_smoke)'"
+    }
+  ],
+  "summary": {
+    "total": 6,
+    "by_severity": { "high": 3, "medium": 2, "low": 1 },
+    "by_tier":     { "proven": 0, "likely": 6, "possible": 0, "unknown": 0 }
+  }
+}
+```
+
+### Markdown output
+
+`--format markdown` produces a paste-to-AI-ready document: summary, per-severity sections, and a verification checklist with `- [ ]` items an agent can tick. Example shape:
 
 ```markdown
-## Verification Checklist (generated by cargo-impact)
-- [ ] Run `cargo nextest run -E 'test(api_smoke) + test(process_event_roundtrip)'` — **Proven**
-- [ ] Manually exercise `GET /api/v1/user/profile` — **Likely** (axum route depends on changed struct)
-- [ ] Review `OnceCell<Config>` init path — **Unknown** (static analysis cannot verify)
-- [ ] Update `docs/architecture.md` — intra-doc link to `process_event` found
-- [ ] Bump minor version: `UserProfile` gained a public field (semver: minor)
+# cargo-impact v0.2.0 blast radius
+
+## Summary
+- **Changed files:** 3
+- **Candidate symbols:** 4
+- **Findings:** 6 (3 high, 2 medium, 1 low, 0 unknown)
+
+## 🔴 HIGH (3)
+- **[f-0001]** `build.rs` changed (build.rs) — *Likely 0.90* — build script changed …
+- **[f-0002]** FFI `callback_t` modified in src/ffi.rs — *Likely 0.95* — blast radius leaves Rust …
+…
+
+## Verification checklist
+- [ ] **HIGH** `build.rs` changed — *Likely 0.90*
+- [ ] **HIGH** FFI `callback_t` modified in src/ffi.rs — *Likely 0.95*
+- [ ] **MEDIUM** test `api_smoke` references process_event — *Likely 0.85*
+…
 ```
 
 ---

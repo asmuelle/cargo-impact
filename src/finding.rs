@@ -107,13 +107,29 @@ pub enum FindingKind {
         doc: Location,
         line: u32,
     },
+    /// An `extern "C"` signature or `#[no_mangle]` function was added,
+    /// removed, or modified. Signatures cross the Rust/native boundary —
+    /// downstream consumers outside Rust cannot be analyzed by us, so these
+    /// are always surfaced at `High` severity.
+    FfiSignatureChange {
+        symbol: String,
+        file: PathBuf,
+        /// `"added"`, `"removed"`, or `"modified"`.
+        change: &'static str,
+    },
+    /// A `build.rs` script file changed. Build scripts can invalidate
+    /// downstream compilation in non-obvious ways (env vars, rerun-if-*,
+    /// generated code, linker flags).
+    BuildScriptChanged { file: PathBuf },
 }
 
 impl FindingKind {
     /// Default severity for this kind — callers can override but rarely need to.
     pub fn default_severity(&self) -> SeverityClass {
         match self {
-            Self::TraitImpl { .. } => SeverityClass::High,
+            Self::TraitImpl { .. }
+            | Self::FfiSignatureChange { .. }
+            | Self::BuildScriptChanged { .. } => SeverityClass::High,
             Self::TestReference { .. } | Self::DynDispatch { .. } => SeverityClass::Medium,
             Self::DocDriftLink { .. } | Self::DocDriftKeyword { .. } => SeverityClass::Low,
         }
@@ -127,6 +143,8 @@ impl FindingKind {
             Self::DynDispatch { .. } => "dyn_dispatch",
             Self::DocDriftLink { .. } => "doc_drift_link",
             Self::DocDriftKeyword { .. } => "doc_drift_keyword",
+            Self::FfiSignatureChange { .. } => "ffi_signature_change",
+            Self::BuildScriptChanged { .. } => "build_script_changed",
         }
     }
 }

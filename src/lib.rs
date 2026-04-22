@@ -35,8 +35,10 @@ use clap::Parser;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+mod diff;
 mod doc_drift;
 mod dyn_dispatch;
+mod ffi;
 pub mod finding;
 pub mod format;
 mod git;
@@ -138,15 +140,36 @@ pub fn run(args: &ImpactArgs) -> Result<i32> {
         return Ok(0);
     }
 
-    // Collect symbols from each changed file. Parse errors downgrade to a
-    // stderr notice and skip the file — a single bad file must not kill the
-    // whole run.
+    // Collect symbols per changed file, diff-aware when possible:
+    //
+    //   1. Try `diff::diff_file` to get the *actually-changed* top-level
+    //      items (Added/Removed/Modified) between `since` and the working
+    //      tree. Narrower candidate set → fewer false positives downstream.
+    //   2. If the diff can't be computed (new file outside HEAD, parse
+    //      failure on either side, non-git checkout), fall back to the v0.1
+    //      blanket approach: every top-level item in the file is a candidate.
+    //
+    // Parse errors on the working-tree side are logged once and the file is
+    // skipped — a single bad file must not kill the whole run.
     let mut all_symbols: Vec<symbols::TopLevelSymbol> = Vec::new();
     for rel in &changed_files {
-        let abs = root.join(rel);
-        match symbols::top_level_symbols(&abs) {
-            Ok(syms) => all_symbols.extend(syms),
-            Err(e) => eprintln!("cargo-impact: skipping {}: {e:#}", rel.display()),
+        match diff::diff_file(&root, rel, &args.since) {
+            Ok(Some(items)) => {
+                for it in items {
+                    all_symbols.push(symbols::TopLevelSymbol {
+                        name: it.name,
+                        kind: it.kind,
+                    });
+                }
+            }
+            Ok(None) => {
+                let abs = root.join(rel);
+                match symbols::top_level_symbols(&abs) {
+                    Ok(syms) => all_symbols.extend(syms),
+                    Err(e) => eprintln!("cargo-impact: skipping {}: {e:#}", rel.display()),
+                }
+            }
+            Err(e) => eprintln!("cargo-impact: diff failed for {}: {e:#}", rel.display()),
         }
     }
     let symbol_names: BTreeSet<String> = all_symbols.iter().map(|s| s.name.clone()).collect();
@@ -162,6 +185,32 @@ pub fn run(args: &ImpactArgs) -> Result<i32> {
         &changed_trait_names,
     )?);
     findings.extend(doc_drift::find_doc_drift(&root, &symbol_names)?);
+
+    // FFI signature diff — per-file.
+    for rel in &changed_files {
+        match ffi::find_ffi_changes(&root, rel, &args.since) {
+            Ok(hits) => findings.extend(hits),
+            Err(e) => eprintln!("cargo-impact: ffi scan failed for {}: {e:#}", rel.display()),
+        }
+    }
+
+    // `build.rs` changes get a dedicated high-severity finding each.
+    for rel in &changed_files {
+        let is_build_rs = rel
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n == "build.rs");
+        if is_build_rs {
+            let evidence = format!(
+                "build script `{}` changed — build scripts can invalidate \
+                 downstream compilation in non-obvious ways (env vars, \
+                 rerun-if-*, generated code, linker flags)",
+                rel.display()
+            );
+            let kind = FindingKind::BuildScriptChanged { file: rel.clone() };
+            findings.push(Finding::new("", Tier::Likely, 0.90, kind, evidence));
+        }
+    }
 
     // Filter by confidence before assigning IDs so IDs are stable for the
     // visible findings.
