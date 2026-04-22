@@ -1,0 +1,29 @@
+[package]
+name = "cargo-impact"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Blast-radius analysis and selective test execution for Rust workspaces"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/asmuelle/cargo-impact"
+readme = "README.md"
+keywords = ["cargo", "testing", "regression", "static-analysis", "ai"]
+categories = [
+    "development-tools::cargo-plugins",
+    "development-tools::testing",
+]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+quote = "1"
+syn = { version = "2", features = ["full", "visit"] }
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
