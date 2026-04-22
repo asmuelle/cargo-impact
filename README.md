@@ -1,5 +1,5 @@
-# 🛠️ Specification: `cargo-impact`
-**Subtitle:** *Predictive Regression Analysis & Verification Mapping for Rust*
+# cargo-impact
+*Predictive Regression Analysis & Verification Mapping for Rust*
 
 > **Status:** Spec v0.2 · Implementation not started · Seeking feedback and contributors.
 > This document is a design spec, not a shipped tool. See §11 for the roadmap.
