@@ -127,6 +127,103 @@ pub enum FindingKind {
     /// own output verbatim so consumers can surface it without a
     /// re-invocation.
     SemverCheck { level: String, details: String },
+    /// A specific, per-method change inside a trait definition. Complements
+    /// `TraitImpl` (which flags every impl of a changed trait at blanket
+    /// precision) by explaining *what* about the trait changed — required
+    /// vs default method, added/removed, signature vs body. Severity and
+    /// confidence derive from `change` per README §3B.
+    TraitDefinitionChange {
+        trait_name: String,
+        file: PathBuf,
+        /// Specific method name when the change is method-scoped; `None`
+        /// for trait-level changes (supertraits, generic bounds).
+        method: Option<String>,
+        /// Machine-readable classification; renderers map this to evidence
+        /// text and severity.
+        change: TraitChange,
+    },
+}
+
+/// Per-method or trait-level change classification. One-to-one with the
+/// bullets in README §3B. Confidence floor for anything requiring
+/// resolution (actual impl bodies) stays at `Likely` in v0.2 — we cannot
+/// prove which impls delegate vs override without rust-analyzer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraitChange {
+    /// A new method was added *without* a default body. Every impl that
+    /// does not supply it will fail to compile.
+    RequiredMethodAdded,
+    /// A new method was added *with* a default body. Rarely breaking, but
+    /// can shadow same-named methods on implementing types.
+    DefaultMethodAdded,
+    /// A method was removed. Breaks any caller that referenced it and any
+    /// impl that still tries to define it.
+    MethodRemoved,
+    /// A required-method signature (args, return type, generics, where
+    /// clause) changed. Impls with the old signature break at compile time.
+    RequiredMethodSignatureChanged,
+    /// Only the body of a default method changed. Runtime behavior shifts
+    /// for impls that rely on the default; impls that override are
+    /// unaffected. We cannot tell which is which without name resolution.
+    DefaultMethodBodyChanged,
+    /// The trait's supertrait list or generic bounds changed. Downstream
+    /// generic code constrained by the trait may stop compiling.
+    SupertraitOrBoundChanged,
+}
+
+impl TraitChange {
+    /// Severity class per README §3B. Required-side changes and removals
+    /// are compile breaks on downstream impls; default-body changes are
+    /// runtime-only and narrower; bound changes sit in the middle.
+    pub fn severity(self) -> SeverityClass {
+        match self {
+            Self::RequiredMethodAdded
+            | Self::RequiredMethodSignatureChanged
+            | Self::MethodRemoved => SeverityClass::High,
+            Self::SupertraitOrBoundChanged => SeverityClass::Medium,
+            Self::DefaultMethodAdded | Self::DefaultMethodBodyChanged => SeverityClass::Low,
+        }
+    }
+
+    /// Confidence tier. All classifications stay at `Likely` or `Possible`
+    /// in v0.2 — proving which impls actually delegate vs override needs
+    /// resolved name lookup, which arrives with rust-analyzer in v0.3.
+    pub fn tier(self) -> Tier {
+        match self {
+            Self::RequiredMethodAdded
+            | Self::RequiredMethodSignatureChanged
+            | Self::MethodRemoved
+            | Self::SupertraitOrBoundChanged => Tier::Likely,
+            Self::DefaultMethodAdded | Self::DefaultMethodBodyChanged => Tier::Possible,
+        }
+    }
+
+    /// Numeric confidence score. Higher for changes that unambiguously
+    /// break downstream compilation; lower for runtime-only or
+    /// defaulted-only changes where impact depends on resolution.
+    pub fn confidence(self) -> f64 {
+        match self {
+            Self::RequiredMethodAdded | Self::RequiredMethodSignatureChanged => 0.95,
+            Self::MethodRemoved => 0.90,
+            Self::SupertraitOrBoundChanged => 0.75,
+            Self::DefaultMethodBodyChanged => 0.55,
+            Self::DefaultMethodAdded => 0.40,
+        }
+    }
+
+    /// Short human phrase for evidence/summary rendering. Callers are
+    /// expected to prepend the trait and method names.
+    pub fn phrase(self) -> &'static str {
+        match self {
+            Self::RequiredMethodAdded => "required method added",
+            Self::DefaultMethodAdded => "default method added",
+            Self::MethodRemoved => "method removed",
+            Self::RequiredMethodSignatureChanged => "required method signature changed",
+            Self::DefaultMethodBodyChanged => "default method body changed",
+            Self::SupertraitOrBoundChanged => "supertraits or generic bounds changed",
+        }
+    }
 }
 
 impl FindingKind {
@@ -143,6 +240,7 @@ impl FindingKind {
                 "minor" | "patch" => SeverityClass::Medium,
                 _ => SeverityClass::Unknown,
             },
+            Self::TraitDefinitionChange { change, .. } => change.severity(),
         }
     }
 
@@ -157,6 +255,7 @@ impl FindingKind {
             Self::FfiSignatureChange { .. } => "ffi_signature_change",
             Self::BuildScriptChanged { .. } => "build_script_changed",
             Self::SemverCheck { .. } => "semver_check",
+            Self::TraitDefinitionChange { .. } => "trait_definition_change",
         }
     }
 }

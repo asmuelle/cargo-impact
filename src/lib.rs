@@ -46,6 +46,7 @@ mod nextest;
 mod semver_checks;
 mod symbols;
 mod tests_scan;
+mod trait_methods;
 mod traits;
 
 pub use finding::{Finding, FindingKind, Location, SeverityClass, Tier, TierSummary};
@@ -200,6 +201,19 @@ pub fn run(args: &ImpactArgs) -> Result<i32> {
         match ffi::find_ffi_changes(&root, rel, &args.since) {
             Ok(hits) => findings.extend(hits),
             Err(e) => eprintln!("cargo-impact: ffi scan failed for {}: {e:#}", rel.display()),
+        }
+    }
+
+    // Per-method trait ripple classification (complements the blanket
+    // TraitImpl scan above by explaining *what* about each trait changed).
+    // §3B: required vs default, added vs removed, sig vs body, supertraits.
+    for rel in &changed_files {
+        match trait_methods::classify_changes_in_file(&root, rel, &args.since) {
+            Ok(records) => findings.extend(records.into_iter().map(|r| r.into_finding())),
+            Err(e) => eprintln!(
+                "cargo-impact: trait-method classification failed for {}: {e:#}",
+                rel.display()
+            ),
         }
     }
 

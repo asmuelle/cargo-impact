@@ -258,6 +258,23 @@ fn finding_summary(f: &Finding) -> String {
         FindingKind::SemverCheck { level, .. } => {
             format!("cargo-semver-checks reports `{level}` public-API change")
         }
+        FindingKind::TraitDefinitionChange {
+            trait_name,
+            method,
+            change,
+            file,
+        } => match method {
+            Some(m) => format!(
+                "trait `{trait_name}`: {} — `{m}` ({})",
+                change.phrase(),
+                file.display()
+            ),
+            None => format!(
+                "trait `{trait_name}`: {} ({})",
+                change.phrase(),
+                file.display()
+            ),
+        },
     }
 }
 

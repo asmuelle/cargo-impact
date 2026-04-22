@@ -480,7 +480,7 @@ The spec is deliberately ambitious. These milestones are the cut points where th
 **Goal:** The report earns the name. Confidence tiers, trait handling, and the first AI-consumable format.
 
 *   ⏳ Macro expansion pass before analysis (`cargo expand` + HIR) — still deferred; nightly toolchain boundary
-*   ⚠ Trait ripple differentiation (§3B): required vs. default vs. new method — blanket `Likely 0.80` shipping now; per-method classification deferred
+*   ✅ Trait ripple differentiation (§3B): required vs. default vs. new method — per-method HEAD-vs-WT classification shipping in addition to the blanket `TraitImpl` scan
 *   ✅ `dyn Trait` dispatch edges as `Likely 0.75`
 *   ✅ Confidence tiers (§3F) with numeric scores (`Proven` reserved for v0.3 RA integration)
 *   ✅ `--format=json` and `--format=markdown`
