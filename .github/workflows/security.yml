@@ -1,0 +1,64 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - deny.toml
+      - .github/workflows/security.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - deny.toml
+  schedule:
+    # Weekly Monday 06:00 UTC — catches newly-disclosed RUSTSEC advisories
+    # even when no code has changed.
+    - cron: "0 6 * * 1"
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      has_lockfile: ${{ steps.check.outputs.has_lockfile }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if [ -f Cargo.lock ]; then
+            echo "has_lockfile=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_lockfile=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  audit:
+    needs: detect
+    if: needs.detect.outputs.has_lockfile == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit --deny warnings
+
+  deny:
+    needs: detect
+    if: needs.detect.outputs.has_lockfile == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      # Runs the checks declared in deny.toml — advisories, bans, licenses, sources.
+      - run: cargo deny check

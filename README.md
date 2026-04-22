@@ -1,92 +1,482 @@
 # 🛠️ Specification: `cargo-impact`
 **Subtitle:** *Predictive Regression Analysis & Verification Mapping for Rust*
 
+> **Status:** Spec v0.2 · Implementation not started · Seeking feedback and contributors.
+> This document is a design spec, not a shipped tool. See §11 for the roadmap.
+
+## Contents
+
+1. [Core Philosophy](#1-core-philosophy)
+2. [Quickstart (Intended UX)](#2-quickstart-intended-ux)
+3. [Technical Architecture](#3-technical-architecture)
+4. [CLI Interface (UX)](#4-cli-interface-ux)
+5. [Vibe Coding Workflow Integration](#5-vibe-coding-workflow-integration)
+6. [Summary Table: Context vs. Impact](#6-summary-table-context-vs-impact)
+7. [Integration with `cargo-context`](#7-integration-with-cargo-context)
+8. [MCP Server Surface](#8-mcp-server-surface)
+9. [Performance Targets](#9-performance-targets)
+10. [Non-Goals](#10-non-goals)
+11. [Implementation Roadmap](#11-implementation-roadmap)
+12. [License](#license)
+
+---
+
 ## 1. Core Philosophy
 `cargo-impact` moves the developer from "Running all tests and hoping for the best" to **Surgical Verification**. It treats a code change as a "stone thrown into a pond" and calculates exactly which ripples hit which shores (tests, docs, APIs).
 
-It answers the critical question: *"I changed X; what is the minimum set of things I must check to be 99% sure I didn't break Y?"*
+It answers the critical question: *"I changed X; what is the minimum set of things I must check, and how confident can I be in each one?"* Every finding is labeled with a confidence tier — static analysis is never certain, and the tool is honest about that.
 
 ---
 
-## 2. Technical Feature Set
+## 2. Quickstart (Intended UX)
 
-### A. The "Blast Radius" Engine (Static Analysis)
-Instead of just looking at files, `cargo-impact` analyzes **symbols**.
-*   **Symbol Tracking:** It uses `syn` and `cargo metadata` to identify exactly which functions, structs, or traits were modified in the `git diff`.
-*   **Call-Graph Traversal:** It performs a reverse-lookup. If `fn calculate_tax()` was changed, it finds every call site of that function across the workspace.
-*   **Trait Ripple Effect:** If a trait definition was changed, it flags every implementation of that trait as "potentially unstable."
+> Once shipped, first-run experience will look like this. None of the commands below work yet.
 
-### B. Affected Test Selection (Surgical Testing)
-Running `cargo test` on a large project is a vibe-killer.
-*   **Direct Mapping:** Matches changed files to corresponding `tests/*.rs` or `#[cfg(test)]` blocks.
-*   **Indirect Mapping:** If `src/auth.rs` was changed, and `tests/api_integration.rs` calls a function in `auth.rs`, it marks that test as "High Priority."
-*   **Action:** It generates a filtered test command: `cargo test test_auth_login test_api_handshake`.
+```bash
+# Install (once v0.1 ships)
+cargo install cargo-impact
 
-### C. Runtime Surface Mapping (The "Exposed" Layer)
-It identifies which "Public Faces" of the application are affected.
-*   **API Endpoints:** If using `axum` or `actix`, it maps changed logic to the routes that trigger it.
-*   **CLI Commands:** If using `clap`, it identifies which subcommands execute the modified code paths.
-*   **Public API:** Flags if a `pub` function signature changed, signaling that downstream crates/users are impacted.
+# In a Rust workspace with uncommitted changes:
+cd my-rust-project
+cargo impact
+```
 
-### D. Documentation Drift Detection
-AI often updates code but forgets the docs.
-*   **Keyword Association:** It scans `.md` files in `/docs` or doc-comments (`///`) for keywords associated with the changed symbols.
-*   **Notification:** *"You changed the `PaymentGateway` logic; the `docs/billing.md` file likely contains outdated information."*
+Expected first-run output:
+
+```text
+cargo-impact v0.1.0 · analyzing diff against HEAD
+building rust-analyzer index (first run, ~15s) ... done
+4 changed symbols · 11 findings
+
+🔴 HIGH (2)   🟡 MEDIUM (4)   🔵 LOW (4)   ⚪ UNKNOWN (1)
+
+Run `cargo impact --test` to execute affected tests only.
+Run `cargo impact --checklist` to generate a verification checklist.
+Run `cargo impact explain f-0007` for details on any finding.
+```
+
+Subsequent runs on the same workspace use the cached index and return in <1 second (see §9).
+
+### Typical AI loop
+```bash
+cargo context --fix | pbcopy           # 1. Give AI the context pack
+# ... AI generates a patch, you apply it ...
+cargo impact --checklist | pbcopy      # 2. Give AI the verification checklist
+# ... AI ticks items, flags what it cannot verify ...
+cargo impact --test                    # 3. Run only the affected tests
+```
 
 ---
 
-## 3. CLI Interface (UX)
+## 3. Technical Architecture
+
+`cargo-impact` is an **orchestrator**, not a from-scratch analyzer. It composes existing best-in-class Rust tooling into a single blast-radius report, with every finding labeled by confidence tier rather than a binary "affected/not affected" flag.
+
+### A. Analysis Backend (The Engine)
+Static analysis of Rust requires *resolved names*, not just syntax. The backend is layered:
+
+| Layer | Tool | Responsibility |
+| :--- | :--- | :--- |
+| Syntax | `syn` | Parse diff hunks → candidate symbols |
+| Macro expansion | `cargo expand` / HIR | Expand derives, attribute, and `fn`-like macros before analysis (critical for `serde`, `axum`, `clap`, `tokio`) |
+| Name resolution & call graph | `rust-analyzer` as library (`ra_ap_hir`, `ra_ap_ide`) | Resolve paths, find references, traverse calls across modules and crates |
+| Public API | `rustdoc --output-format json` + `cargo-public-api` | Stable diff of the public surface |
+| Semver impact | `cargo-semver-checks` | Classify public changes as additive vs. breaking |
+| Cache | `target/impact-cache/` keyed by content hash + cargo fingerprint | Sub-second warm runs; incremental invalidation |
+
+Why not `syn` alone: re-exports, trait method dispatch, generics, and macro-generated code all defeat syntax-only analysis. rust-analyzer gives IDE-grade precision on stable Rust.
+
+### B. Blast Radius Detection
+For each changed symbol, `cargo-impact` emits a finding with a **confidence tier** (see §3F):
+
+*   **Direct references:** Resolved call-graph edges from the reverse-reference index → `Proven`.
+*   **Trait ripple (differentiated):**
+    *   Required method signature changed → `Proven` (all impls break at compile time; report as build consequence, not risk).
+    *   Default method body changed → `Likely` for impls that *don't* override; `Proven` for impls that delegate via `super::`.
+    *   New method added → `Proven` compile break unless defaulted.
+    *   Trait bound changed → `Likely` for downstream generic code.
+*   **Dynamic dispatch (`dyn Trait`):** All impls reachable via `dyn Trait` construction sites → `Likely`.
+*   **FFI / `unsafe extern`:** Any change to `extern "C"` signatures or `#[no_mangle]` symbols → `Proven` HIGH (blast radius leaves Rust entirely).
+*   **`build.rs` changes:** Treated as `Proven` HIGH by default — build scripts can invalidate downstream compilation in non-obvious ways.
+*   **Feature-gated code:** If the changed symbol is behind `#[cfg(feature = "...")]`, run analysis per active feature set. `--features`, `--all-features`, and `--feature-powerset` supported.
+
+### C. Surgical Testing
+Does not re-implement test selection — orchestrates proven tools:
+
+*   **Coverage-driven selection:** Delegates to [`cargo-difftests`](https://github.com/dnbln/cargo-difftests) for file-to-test mapping based on actual coverage traces.
+*   **Call-graph augmentation:** Adds tests that *statically* reference changed symbols but weren't hit by the last coverage run (catches untested paths).
+*   **Emits nextest filters:** Output is a [`cargo-nextest`](https://nexte.st) filter expression, e.g. `cargo nextest run -E 'test(test_auth_login) + test(test_api_handshake)'`. Falls back to `cargo test` filters when nextest is absent.
+*   **Handles:** doctests in triple-backtick blocks inside doc comments, `#[cfg(test)] mod tests`, per-member integration tests in workspaces, `rstest` / `proptest` parameterization, `#[ignore]`, `serial_test`.
+
+### D. Runtime Surface Mapping (The "Exposed" Layer)
+Framework detection runs **after macro expansion** (handler attributes, derive-based routers are invisible pre-expansion). Pluggable adapters, not hardcoded framework logic:
+
+*   **HTTP routers:** `axum` (`Router::route`, nested routers, `#[debug_handler]`), `actix-web` (`web::resource`, scopes), `rocket` (`#[get]`/`#[post]`), `warp`.
+*   **CLI:** `clap` derive and builder APIs.
+*   **Desktop/mobile:** `tauri` commands, `dioxus` routes.
+*   **Public crate API:** Delegated to `cargo-semver-checks` + `cargo-public-api`.
+*   **Adapter contract:** A small trait so third parties can register custom surface mappers for proprietary frameworks.
+
+### E. Documentation Drift Detection
+Precise, not keyword-based:
+
+*   **Intra-doc links:** Parses rustdoc JSON for `[\`PaymentGateway\`]`-style references in doc comments and `/docs/*.md`. Exact symbol resolution, not substring match on `User`.
+*   **Rustdoc example blocks:** Flags doctest examples that exercise changed symbols.
+*   **Changelog heuristic:** If a `pub` item changed and `CHANGELOG.md` / `RELEASES.md` wasn't touched in the same diff → flag.
+
+### F. Confidence Tiers
+Every finding carries a tier. This replaces the fiction that static analysis is ever "99% sure."
+
+| Tier | Score | Meaning | Example source |
+| :--- | :--- | :--- | :--- |
+| **Proven** | 0.95–1.00 | Resolved call-graph edge or rustdoc JSON symbol match | `fn a()` calls `fn b()` directly, both resolved |
+| **Likely** | 0.60–0.94 | Trait impl via `dyn`, feature-gated caller, default-method non-overrider | Handler registered via `axum::Router::route` with expanded macro |
+| **Possible** | 0.30–0.59 | Heuristic match, unexpanded macro residue, cross-crate without rustdoc | Identifier appears in doc comment without intra-doc link |
+| **Unknown** | < 0.30 | Listed but not scored | Reflection via `Any`, runtime config, FFI callbacks, `OnceCell` mutation |
+
+`--confidence-min=0.6` filters output for CI; default shows all tiers with the score attached.
+
+---
+
+## 4. CLI Interface (UX)
 
 ```bash
 # Analyze the current git diff and show the blast radius
 cargo impact
 
-# Only run the tests that are likely affected by the current changes
+# Only run the tests that are likely affected (emits nextest filter)
 cargo impact --test
 
-# Generate a "Verification Checklist" for the AI to follow
-cargo impact --checklist
+# Generate a machine-readable verification checklist for an AI agent
+cargo impact --checklist --format=markdown
 
 # Analyze a specific commit range
 cargo impact --since a1b2c3d
+
+# AI-consumable formats
+cargo impact --format=json              # structured risk graph
+cargo impact --format=markdown          # paste-to-AI
+cargo impact --format=mcp               # MCP tool-call envelope
+cargo impact --context                  # emit cargo-context pack of affected files
+
+# Feature-aware analysis
+cargo impact --features="foo,bar"
+cargo impact --all-features
+cargo impact --feature-powerset         # expensive; CI only
+
+# Filtering
+cargo impact --confidence-min=0.6       # hide Possible / Unknown tiers
+cargo impact --fail-on=high             # CI: exit non-zero if HIGH findings exist
 ```
 
-### The "Blast Radius" Report (Output):
-When running `cargo impact`, the tool outputs a categorized risk assessment:
+### The "Blast Radius" Report (Output)
+Each finding includes a **confidence tier** and **score**. Bucketed by severity × reach, not by a single "risk" axis:
 
-**🔴 HIGH RISK (Directly Modified)**
-- `src/core/engine.rs` $\rightarrow$ `fn process_event()`
-- `src/models/user.rs` $\rightarrow$ `struct UserProfile`
+**🔴 HIGH — Breaking or compile-affecting**
+- `src/core/engine.rs` → `fn process_event()` *(modified)* · **Proven 1.00**
+- `src/models/user.rs` → `struct UserProfile` *(field added)* · **Proven 1.00** · semver: minor
+- `src/ffi.rs` → `extern "C" fn callback_t` *(signature changed)* · **Proven 1.00** · blast radius leaves Rust
 
-**🟡 MEDIUM RISK (Indirectly Affected)**
-- **Tests:** `tests/integration_tests.rs` (calls `process_event`)
-- **API:** `GET /api/v1/user/profile` (depends on `UserProfile`)
-- **Crates:** `crate-api-gateway` (depends on `core` crate)
+**🟡 MEDIUM — Runtime behavior likely affected**
+- `tests/integration_tests.rs::api_smoke` calls `process_event` · **Proven 0.98**
+- `GET /api/v1/user/profile` (axum handler, macro-expanded) depends on `UserProfile` · **Likely 0.82**
+- `crate-api-gateway` depends on `core` via re-export `core::engine::*` · **Likely 0.75**
+- `impl Handler for AuthMiddleware` via `dyn Handler` at `router.rs:42` · **Likely 0.68**
 
-**🔵 LOW RISK (Documentation/Peripheral)**
-- `docs/architecture.md` (mentions `process_event`)
-- `src/cli.rs` $\rightarrow$ `cmd sync`
+**🔵 LOW — Peripheral / heuristic**
+- `docs/architecture.md` contains intra-doc link to `[\`process_event\`]` · **Proven 0.95** (doc drift)
+- `src/cli.rs` → `cmd sync` (keyword match only) · **Possible 0.40**
+
+**⚪ UNKNOWN — Flagged, not scored**
+- `OnceCell<Config>` in `src/runtime.rs` initialized from changed path · manual review recommended
+
+### `--checklist` Output Shape
+Structured Markdown with `- [ ]` checkboxes an agent can tick, plus a JSON sibling for programmatic consumption:
+
+```markdown
+## Verification Checklist (generated by cargo-impact)
+- [ ] Run `cargo nextest run -E 'test(api_smoke) + test(process_event_roundtrip)'` — **Proven**
+- [ ] Manually exercise `GET /api/v1/user/profile` — **Likely** (axum route depends on changed struct)
+- [ ] Review `OnceCell<Config>` init path — **Unknown** (static analysis cannot verify)
+- [ ] Update `docs/architecture.md` — intra-doc link to `process_event` found
+- [ ] Bump minor version: `UserProfile` gained a public field (semver: minor)
+```
 
 ---
 
-## 4. Vibe Coding Workflow Integration
+## 5. Vibe Coding Workflow Integration
 
-This completes the **Context $\rightarrow$ Code $\rightarrow$ Verify** loop:
+This completes the **Context → Code → Verify** loop:
 
-1.  **Context:** `cargo context --fix | pbcopy` $\rightarrow$ AI generates a fix.
+1.  **Context:** `cargo context --fix | pbcopy` → AI generates a fix.
 2.  **Apply:** Developer applies the AI's code.
 3.  **Impact:** Developer runs `cargo impact`.
-4.  **Verify:** 
-    *   Developer sees that `cargo impact` flagged a specific integration test and one API endpoint.
-    *   Developer runs `cargo impact --test` (takes 5 seconds instead of 5 minutes).
-    *   Developer tells the AI: *"The fix works, but `cargo-impact` says this might affect the `/user/profile` endpoint. Can you double-check the logic for that specific surface?"*
+4.  **Verify:**
+    *   `cargo impact` flags a specific integration test and one API endpoint (with confidence tiers).
+    *   Developer runs `cargo impact --test` (5 seconds instead of 5 minutes).
+    *   Developer runs `cargo impact --checklist --format=markdown | pbcopy` and pastes back to the AI: *"Here's the verification checklist — tick what you've addressed and tell me what you still need me to test manually."*
 
-## 5. Summary Table: Context vs. Impact
+## 6. Summary Table: Context vs. Impact
 
 | Feature | `cargo-context` (The Input) | `cargo-impact` (The Output) |
 | :--- | :--- | :--- |
 | **Goal** | Maximize AI understanding | Minimize human verification effort |
 | **Focus** | What is the AI looking at? | What did the AI touch? |
-| **Primary Tool** | `git diff` + `cargo metadata` | Call-graph + Symbol analysis |
-| **Key Output** | A Markdown Context Pack | A Blast Radius Risk Report |
+| **Primary Tools** | `git diff` + `cargo metadata` + rustdoc JSON | `rust-analyzer` call graph + `cargo-difftests` + `cargo-semver-checks` |
+| **Key Output** | A Markdown Context Pack | A confidence-tiered Blast Radius Report |
 | **Vibe Shift** | No more copy-pasting files | No more "test all and pray" |
+
+---
+
+## 7. Integration with `cargo-context`
+
+`cargo-impact` and `cargo-context` are designed as a **bidirectional pair**, not two isolated tools. They share cache, symbol index, and MCP surface.
+
+### Forward flow: Context → Impact
+The normal developer loop. AI edits files inside a context pack; `cargo-impact` analyzes the resulting diff.
+
+```bash
+cargo context --fix | pbcopy         # AI gets context, generates patch
+# ... apply patch ...
+cargo impact                         # analyze what the patch touched
+```
+
+### Reverse flow: Impact → Context
+When `cargo-impact` flags uncertain findings (`Likely` / `Unknown` tiers), pipe them back into `cargo-context` to give the AI a second, targeted context pack for the affected surface:
+
+```bash
+cargo impact --context --confidence-max=0.9 \
+  | cargo context --stdin --budget=8000 \
+  | pbcopy
+# Feeds AI: "Here are the files cargo-impact is unsure about — re-verify."
+```
+
+### Scope-limited context packs
+`cargo context` can take an impact report as a filter, producing a context pack scoped to just the affected modules instead of the full diff neighborhood:
+
+```bash
+cargo impact --format=json > .impact.json
+cargo context --impact-scope=.impact.json   # pack contains only files in the blast radius
+```
+
+### Shared cache
+Both tools read and write `target/ai-tools-cache/` with namespaced subdirectories (`context/`, `impact/`). Symbol indices built by rust-analyzer are shared — `cargo-impact` does not rebuild what `cargo-context` already indexed in the same session.
+
+### Shared MCP server
+When both tools are installed, a single `cargo-ai-tools` MCP server exposes both tool families under one process (see §8). An AI agent connects once, gets both.
+
+---
+
+## 8. MCP Server Surface
+
+`cargo-impact` ships as a CLI **and** an MCP server. Agents (Claude Code, Cursor, Zed, custom) connect over stdio and call tools directly — no copy-paste, no shell parsing.
+
+```bash
+cargo impact mcp           # start MCP server over stdio
+cargo impact mcp --http    # or Streamable HTTP on localhost
+```
+
+### Tools exposed
+
+| Tool | Purpose | Returns |
+| :--- | :--- | :--- |
+| `impact.analyze` | Run blast radius on current diff or commit range | Structured finding graph with tiers |
+| `impact.test_filter` | Get a `cargo-nextest` filter expression for affected tests | String + rationale per test |
+| `impact.checklist` | Generate the verification checklist | Markdown + JSON sibling |
+| `impact.surface` | List affected runtime surfaces (routes, CLI subcommands, FFI) | Structured surface list |
+| `impact.semver` | Classify public API changes | `{additive, breaking, none}` + reasons |
+| `impact.explain` | Explain *why* a specific finding was flagged | Trace of the evidence chain |
+
+### Tool schema example: `impact.analyze`
+
+```json
+{
+  "name": "impact.analyze",
+  "description": "Analyze the blast radius of a git diff in a Rust workspace.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "since": { "type": "string", "description": "Git ref, e.g. 'HEAD~1' or 'main'. Defaults to unstaged+staged." },
+      "features": { "type": "array", "items": { "type": "string" } },
+      "all_features": { "type": "boolean", "default": false },
+      "confidence_min": { "type": "number", "minimum": 0, "maximum": 1 },
+      "max_findings": { "type": "integer", "default": 200 }
+    }
+  }
+}
+```
+
+### Response envelope
+Every tool returns the same outer shape so agents can reason uniformly:
+
+```json
+{
+  "findings": [
+    {
+      "id": "f-0001",
+      "severity": "high|medium|low|unknown",
+      "tier": "proven|likely|possible|unknown",
+      "confidence": 0.98,
+      "kind": "direct_call|trait_impl|dyn_dispatch|ffi|route|doc_drift|semver",
+      "source": { "file": "src/core/engine.rs", "symbol": "process_event", "span": [41, 67] },
+      "target": { "file": "tests/integration_tests.rs", "symbol": "api_smoke" },
+      "evidence": "Resolved call-graph edge via ra_ap_ide::references",
+      "suggested_action": "cargo nextest run -E 'test(api_smoke)'"
+    }
+  ],
+  "summary": { "proven": 4, "likely": 7, "possible": 2, "unknown": 1 },
+  "cache": { "hit": true, "build_time_ms": 142 }
+}
+```
+
+### Why not just parse CLI output
+Agents parsing pretty-printed CLI text is brittle and burns tokens. MCP tool calls return typed JSON, stream progress for long analyses, and let the agent ask `impact.explain(id="f-0007")` to drill into a specific finding without re-running the whole analysis.
+
+---
+
+## 9. Performance Targets
+
+The "5 seconds, not 5 minutes" claim in §5 needs teeth. These are the SLOs the tool targets — not aspirational, but used as regression thresholds in the benchmark suite.
+
+| Scenario | Target | Measured on |
+| :--- | :--- | :--- |
+| Warm run, <50 changed files, small workspace (<10 crates) | **< 500ms** | `cargo-impact` self-hosting benchmark |
+| Warm run, typical workspace (10–30 crates) | **< 1.5s** | `ripgrep`, `zola`-sized repos |
+| Warm run, large workspace (100+ crates) | **< 5s** | `rustc`, `deno`, internal monorepos |
+| Cold run (first invocation, no cache) | **< 30s** for 100-crate workspace | includes RA index build |
+| MCP response p95 | **< 200ms** after warm cache | per-tool-call latency |
+| `--feature-powerset` on 8 features | **< 60s** | CI-only mode, not interactive |
+
+### Cache strategy
+*   **Keyed on:** `(file_content_hash, cargo_fingerprint, rustc_version, features_hash)`.
+*   **Granularity:** Per-file symbol index, per-symbol call-graph edges. A one-line change in `src/utils.rs` invalidates only `utils`'s index and its dependents' edges — not the whole crate.
+*   **Location:** `target/ai-tools-cache/impact/` (shared with `cargo-context`, see §7).
+*   **Eviction:** LRU by access time; cap at 500MB by default, configurable via `CARGO_IMPACT_CACHE_SIZE`.
+*   **Invalidation signal:** `cargo-impact` watches `Cargo.lock` and rustc version; bumps purge dependent caches.
+
+### When performance degrades
+If a run exceeds 2× the target for its scenario, `cargo-impact` emits a diagnostic:
+
+```
+⚠ cargo-impact: analysis took 4.2s (target < 1.5s for this workspace size).
+  Likely cause: rust-analyzer index cold (cache dir recently cleared).
+  Subsequent runs should be fast. Run `cargo impact --bench` to profile.
+```
+
+### Benchmark suite
+`cargo impact --bench` runs a built-in benchmark against the current workspace, reports against the SLO table, and writes a JSON trace for regression tracking. Designed to be run in CI on the cargo-impact repo itself — no flaky wall-clock assertions, uses the cargo fingerprint to skip when inputs are unchanged.
+
+---
+
+## 10. Non-Goals
+
+Scope discipline matters. `cargo-impact` is a **static impact oracle**, not a correctness checker. The following are explicitly out of scope and will not be added:
+
+*   **Runtime behavior verification.** The tool does not execute code, trace syscalls, or observe actual runtime paths. A function can pass every affected test and still be broken in production; `cargo-impact` cannot detect that.
+*   **Logic bug detection.** If the AI writes `a + b` where it meant `a - b` and the tests don't catch it, neither will `cargo-impact`. We tell you *what* to check, not *whether the logic is right*.
+*   **Code review replacement.** A human (or reviewing agent) still reads the diff. The blast radius tells them where to focus, not what to conclude.
+*   **Mutation testing.** That is [`cargo-mutants`](https://github.com/sourcefrog/cargo-mutants)'s job. If you want "would this test catch a bug if one existed," use that.
+*   **Fuzzing / property testing integration.** Out of scope. Run `cargo-fuzz` / `proptest` separately and feed their failures back to the AI through whatever channel you already use.
+*   **Type-level refactoring guidance.** We flag that `UserProfile` was modified; we do not advise on whether a different type design would have been better.
+*   **Runtime tracing or profiling.** Not a flamegraph, not a tokio console, not a perf tool.
+*   **IDE diagnostics.** `rust-analyzer` already does this. We consume its index; we do not compete with it.
+*   **Formatting, linting, or style enforcement.** `rustfmt` and `clippy` exist.
+*   **Dependency vulnerability scanning.** That is [`cargo-audit`](https://rustsec.org) / [`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny).
+*   **Build-time regression detection.** Changes that blow up compile time are real but invisible to us — use [`cargo-bloat`](https://github.com/RazrFalcon/cargo-bloat) or `-Z self-profile`.
+*   **Cross-language impact.** A Rust change that breaks a Python FFI consumer is flagged at the `extern "C"` boundary (§3B) but we do not trace into the foreign language.
+*   **Non-Rust workspaces.** We are `cargo-*`. Polyglot monorepos are out of scope; run `cargo-impact` against the Rust portion and compose with your own tooling for the rest.
+
+### What we *will* integrate but not reinvent
+*   Selective testing → `cargo-difftests`
+*   Semver classification → `cargo-semver-checks`
+*   Public-API diffing → `cargo-public-api`
+*   Test execution → `cargo-nextest`
+*   Name resolution → `rust-analyzer` (as library)
+
+If an existing tool solves a subproblem well, we orchestrate it. If we find ourselves reimplementing one, that is a signal we are off-mission.
+
+---
+
+## 11. Implementation Roadmap
+
+The spec is deliberately ambitious. These milestones are the cut points where the tool is genuinely useful to a real user, not a lab demo. Each milestone ships independently.
+
+### v0.1 — "Surgical test filter" (the MVP)
+**Goal:** A Rust developer saves time on `cargo test` today, with zero AI integration.
+
+*   `cargo impact` parses `git diff` with `syn` → candidate symbols
+*   `rust-analyzer` (as library) resolves direct call-graph references
+*   Emits a `cargo-nextest` filter expression
+*   Human-readable text output, one severity column (no tiers yet)
+*   Honest cache: per-file, content-hash keyed
+*   **Shipped:** nothing below this line
+
+**Deliberately deferred:** macros, traits, features, MCP, framework adapters, confidence tiers, public-API analysis. If v0.1 isn't a 2-week project, we're over-engineering.
+
+**Success metric:** On the `ripgrep` workspace, typical edits trigger <10% of tests with zero false negatives across 50 seeded changes.
+
+### v0.2 — "Honest blast radius"
+**Goal:** The report earns the name. Confidence tiers, trait handling, and the first AI-consumable format.
+
+*   Macro expansion pass before analysis (`cargo expand` + HIR)
+*   Trait ripple differentiation (§3B): required vs. default vs. new method
+*   `dyn Trait` dispatch edges as `Likely`
+*   Confidence tiers (§3F) with numeric scores
+*   `--format=json` and `--format=markdown`
+*   `--features` / `--all-features`
+*   `cargo-semver-checks` integration for public API changes
+*   `--confidence-min` and `--fail-on=high` for CI
+*   Documentation drift via intra-doc links
+
+**Success metric:** On the cargo-impact repo itself, 95% of `Proven`-tier findings correspond to tests that actually fail when the finding is seeded as a regression.
+
+### v0.3 — "Agent-native"
+**Goal:** First-class AI integration. The tool is now consumed by agents, not just humans.
+
+*   MCP server (`cargo impact mcp`) with the six tools from §8
+*   `--context` bridge to `cargo-context`
+*   `impact.explain` drill-down
+*   Framework adapters: `axum`, `clap` (reference implementations); documented adapter trait for third parties
+*   `cargo impact log-miss` for ground-truth collection
+*   Token budgeting on markdown output
+*   Configuration file (`cargo-impact.toml`) + `.impactignore`
+
+**Success metric:** A Claude Code / Cursor session can complete a non-trivial Rust refactor using only MCP tool calls — no shell output parsing, no manual context assembly.
+
+### v0.4 — "Production-grade"
+**Goal:** Ready for use in serious CI pipelines and large workspaces.
+
+*   Adapters: `actix-web`, `rocket`, `tauri`, `dioxus`
+*   `--feature-powerset` (CI mode)
+*   Cross-target support (`--target wasm32-unknown-unknown`, `no_std`)
+*   Streaming progress over MCP for long analyses
+*   Deterministic output for reproducible CI artifacts
+*   `cargo-difftests` coverage integration (if stable by then)
+*   Benchmark suite hardening; SLO regression gates in CI
+*   Pre-push and GitHub Actions recipes shipped as templates
+
+**Success metric:** Deployable on a 100+ crate workspace with a stable, cached p50 under 2 seconds.
+
+### Beyond v0.4
+Uncertain and deliberately unplanned. Candidates (prioritized by user demand, not roadmap):
+
+*   IDE integration (VS Code extension, Zed)
+*   `git bisect` driver that uses impact data to narrow the search
+*   Historical blast-radius mining from the full repo history (find under-tested hot spots)
+*   Cross-workspace impact for polyrepo setups with path dependencies
+
+### What could kill each milestone
+Honest risk log, not hand-wave:
+
+| Milestone | Biggest risk | Mitigation |
+| :--- | :--- | :--- |
+| v0.1 | `ra_ap_*` API churn between rust-analyzer releases | Pin RA version per release; fall back to LSP protocol if library API breaks |
+| v0.2 | Macro expansion is too slow or too incomplete on real workspaces | Downgrade confidence on unexpanded macros rather than fail; document known-bad proc macros |
+| v0.3 | MCP ecosystem fragments before stabilizing | Ship stdio + Streamable HTTP; keep CLI first-class so tool isn't MCP-dependent |
+| v0.4 | `cargo-difftests` doesn't mature / is abandoned | Fall back to call-graph-only test selection (less precise but still useful) |
+
+---
+
+## License
+
+Dual-licensed under MIT and Apache-2.0, per Rust ecosystem convention.
