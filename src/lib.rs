@@ -35,6 +35,7 @@ use clap::Parser;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+mod cfg;
 mod diff;
 mod doc_drift;
 mod dyn_dispatch;
@@ -98,6 +99,25 @@ pub struct ImpactArgs {
     /// skipped (non-fatal).
     #[arg(long)]
     pub semver_checks: bool,
+
+    /// Activate these Cargo features for cfg evaluation. Accepts a
+    /// comma-separated list and/or repeated flags. Takes precedence over
+    /// the manifest's `default` set and is unioned with it unless
+    /// `--no-default-features` is also supplied. Transitively expands
+    /// feature dependencies per the manifest's `[features]` table.
+    #[arg(long = "features", value_delimiter = ',')]
+    pub features: Vec<String>,
+
+    /// Activate every feature declared in the manifest's `[features]`
+    /// table. Mutually useful with `--no-default-features` when you want
+    /// to audit the full surface instead of just the default view.
+    #[arg(long, conflicts_with = "no_default_features")]
+    pub all_features: bool,
+
+    /// Skip the manifest's `default` feature list. Mirrors cargo's
+    /// `--no-default-features`.
+    #[arg(long)]
+    pub no_default_features: bool,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -132,7 +152,23 @@ pub fn run(args: &ImpactArgs) -> Result<i32> {
         None => std::env::current_dir().context("reading current directory")?,
     };
 
-    let changed_files = git::changed_rust_files(&root, &args.since)?;
+    // Resolve features once, install as thread-local for the whole analyzer
+    // block. `cfg::parse_and_filter` — used by every analyzer in place of
+    // `syn::parse_file` — reads the thread-local to strip items whose cfg
+    // gates don't match. `FeatureSet::Permissive` (the v0.1 behavior) is
+    // returned when the user passes no feature flags and no manifest is
+    // readable, so existing tests and workflows keep working untouched.
+    let features = cfg::resolve_features(
+        &root,
+        &args.features,
+        args.no_default_features,
+        args.all_features,
+    )?;
+    cfg::with_features(features, || run_inner(args, &root))
+}
+
+fn run_inner(args: &ImpactArgs, root: &std::path::Path) -> Result<i32> {
+    let changed_files = git::changed_rust_files(root, &args.since)?;
     if changed_files.is_empty() {
         if args.test {
             println!();
@@ -163,7 +199,7 @@ pub fn run(args: &ImpactArgs) -> Result<i32> {
     // skipped — a single bad file must not kill the whole run.
     let mut all_symbols: Vec<symbols::TopLevelSymbol> = Vec::new();
     for rel in &changed_files {
-        match diff::diff_file(&root, rel, &args.since) {
+        match diff::diff_file(root, rel, &args.since) {
             Ok(Some(items)) => {
                 for it in items {
                     all_symbols.push(symbols::TopLevelSymbol {
@@ -188,17 +224,17 @@ pub fn run(args: &ImpactArgs) -> Result<i32> {
     // Run analyzers. Each returns findings with empty IDs which the
     // orchestrator assigns sequentially below.
     let mut findings = Vec::new();
-    findings.extend(tests_scan::find_affected_tests(&root, &symbol_names)?);
-    findings.extend(traits::find_trait_impls(&root, &changed_trait_names)?);
+    findings.extend(tests_scan::find_affected_tests(root, &symbol_names)?);
+    findings.extend(traits::find_trait_impls(root, &changed_trait_names)?);
     findings.extend(dyn_dispatch::find_dyn_dispatch_sites(
-        &root,
+        root,
         &changed_trait_names,
     )?);
-    findings.extend(doc_drift::find_doc_drift(&root, &symbol_names)?);
+    findings.extend(doc_drift::find_doc_drift(root, &symbol_names)?);
 
     // FFI signature diff — per-file.
     for rel in &changed_files {
-        match ffi::find_ffi_changes(&root, rel, &args.since) {
+        match ffi::find_ffi_changes(root, rel, &args.since) {
             Ok(hits) => findings.extend(hits),
             Err(e) => eprintln!("cargo-impact: ffi scan failed for {}: {e:#}", rel.display()),
         }
@@ -208,7 +244,7 @@ pub fn run(args: &ImpactArgs) -> Result<i32> {
     // TraitImpl scan above by explaining *what* about each trait changed).
     // §3B: required vs default, added vs removed, sig vs body, supertraits.
     for rel in &changed_files {
-        match trait_methods::classify_changes_in_file(&root, rel, &args.since) {
+        match trait_methods::classify_changes_in_file(root, rel, &args.since) {
             Ok(records) => findings.extend(records.into_iter().map(|r| r.into_finding())),
             Err(e) => eprintln!(
                 "cargo-impact: trait-method classification failed for {}: {e:#}",
@@ -236,7 +272,7 @@ pub fn run(args: &ImpactArgs) -> Result<i32> {
     }
 
     // Opt-in public-API breakage analysis via cargo-semver-checks.
-    match semver_checks::run(&root, &args.since, args.semver_checks) {
+    match semver_checks::run(root, &args.since, args.semver_checks) {
         Ok(hits) => findings.extend(hits),
         Err(e) => eprintln!("cargo-impact: semver-checks failed: {e:#}"),
     }

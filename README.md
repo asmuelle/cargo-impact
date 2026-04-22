@@ -167,6 +167,17 @@ cargo impact --format json       # structured envelope; stable schema for agents
 cargo impact --confidence-min 0.6   # hide Possible / Unknown findings
 cargo impact --fail-on high         # exit 1 if any HIGH finding is emitted
 cargo impact --fail-on medium       # exit 1 on HIGH or MEDIUM
+
+# Feature-aware analysis — cfg(feature = "x") gates are evaluated against
+# the resolved active set. Items whose gates don't match are stripped before
+# every analyzer sees them.
+cargo impact --features tokio,rt            # union with default features
+cargo impact --features tokio --no-default-features
+cargo impact --all-features                 # audit the full feature surface
+
+# Opt-in public-API breakage detection (requires cargo-semver-checks on PATH;
+# runs rustdoc twice internally, typically 10–30s).
+cargo impact --semver-checks
 ```
 
 ### Sample report (text)
@@ -484,7 +495,7 @@ The spec is deliberately ambitious. These milestones are the cut points where th
 *   ✅ `dyn Trait` dispatch edges as `Likely 0.75`
 *   ✅ Confidence tiers (§3F) with numeric scores (`Proven` reserved for v0.3 RA integration)
 *   ✅ `--format=json` and `--format=markdown`
-*   ⏳ `--features` / `--all-features` still deferred (requires cfg-aware re-parse)
+*   ✅ `--features` / `--all-features` / `--no-default-features` — cfg-aware AST filtering against the resolved feature set
 *   ✅ `cargo-semver-checks` integration (opt-in via `--semver-checks`)
 *   ✅ `--confidence-min` and `--fail-on={high,medium,low}` for CI
 *   ✅ Documentation drift via intra-doc links (plus length-gated keyword fallback)

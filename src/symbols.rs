@@ -1,7 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::fs;
 use std::path::Path;
-use syn::{File, Item};
+use syn::Item;
 
 /// Categorization of a top-level Rust item. Trait ripple and dyn-dispatch
 /// analysis filter on this.
@@ -30,7 +30,8 @@ pub struct TopLevelSymbol {
 /// affect every item defined within. Span-accurate hunk mapping arrives later.
 pub fn top_level_symbols(file: &Path) -> Result<Vec<TopLevelSymbol>> {
     let src = fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
-    let ast: File = syn::parse_file(&src).with_context(|| format!("parsing {}", file.display()))?;
+    let ast =
+        crate::cfg::parse_and_filter(&src).ok_or_else(|| anyhow!("parsing {}", file.display()))?;
     let mut out = Vec::new();
     collect_items(&ast.items, &mut out);
     Ok(out)

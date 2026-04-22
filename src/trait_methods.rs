@@ -76,10 +76,10 @@ pub fn classify_changes_in_file(
         None => return Ok(Vec::new()),
     };
 
-    let Ok(wt_ast) = syn::parse_file(&wt_src) else {
+    let Some(wt_ast) = crate::cfg::parse_and_filter(&wt_src) else {
         return Ok(Vec::new());
     };
-    let Ok(head_ast) = syn::parse_file(&head_src) else {
+    let Some(head_ast) = crate::cfg::parse_and_filter(&head_src) else {
         return Ok(Vec::new());
     };
 

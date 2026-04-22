@@ -53,10 +53,10 @@ pub fn diff_file(root: &Path, rel_file: &Path, since: &str) -> Result<Option<Vec
         }
     };
 
-    let Ok(head_ast) = syn::parse_file(&head_src) else {
+    let Some(head_ast) = crate::cfg::parse_and_filter(&head_src) else {
         return Ok(None);
     };
-    let Ok(wt_ast) = syn::parse_file(&wt_src) else {
+    let Some(wt_ast) = crate::cfg::parse_and_filter(&wt_src) else {
         return Ok(None);
     };
 
@@ -87,7 +87,7 @@ fn git_show(root: &Path, rev: &str, rel: &Path) -> Result<Option<String>> {
 }
 
 fn all_as(src: &str, change: ItemChange) -> Vec<ChangedItem> {
-    let Ok(ast) = syn::parse_file(src) else {
+    let Some(ast) = crate::cfg::parse_and_filter(src) else {
         return Vec::new();
     };
     items_by_name(&ast)

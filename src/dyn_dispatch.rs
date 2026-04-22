@@ -30,7 +30,7 @@ pub fn find_dyn_dispatch_sites(
         let Ok(src) = std::fs::read_to_string(path) else {
             continue;
         };
-        let Ok(ast) = syn::parse_file(&src) else {
+        let Some(ast) = crate::cfg::parse_and_filter(&src) else {
             continue;
         };
 

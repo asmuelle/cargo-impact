@@ -25,10 +25,10 @@ pub fn find_ffi_changes(root: &Path, rel_file: &Path, since: &str) -> Result<Vec
     // New file — no HEAD version means every FFI symbol is "added".
     let head: String = git_show(root, since, rel_file)?.unwrap_or_default();
 
-    let Ok(wt_ast) = syn::parse_file(&wt) else {
+    let Some(wt_ast) = crate::cfg::parse_and_filter(&wt) else {
         return Ok(Vec::new());
     };
-    let head_ast = syn::parse_file(&head).ok();
+    let head_ast = crate::cfg::parse_and_filter(&head);
 
     let wt_sigs = ffi_signatures(&wt_ast);
     let head_sigs = head_ast.as_ref().map(ffi_signatures).unwrap_or_default();
