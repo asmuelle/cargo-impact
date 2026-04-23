@@ -7,7 +7,7 @@
 [![Release](https://github.com/asmuelle/cargo-impact/actions/workflows/release.yml/badge.svg)](https://github.com/asmuelle/cargo-impact/actions/workflows/release.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-> **Status:** v0.2.0 (alpha). Core analyzer is live; several roadmap items remain in flight. This README is both the living design spec and the user manual for the shipping tool — sections that describe yet-unshipped behavior are explicitly called out (see §11 for the roadmap).
+> **Status:** v0.3.0 (stable) on [crates.io](https://crates.io/crates/cargo-impact) — `cargo install cargo-impact`. This README is both the living design spec and the user manual; sections describing yet-unshipped behavior are explicitly called out (§11 has the full shipped-vs-deferred breakdown).
 
 ## Contents
 
@@ -44,7 +44,7 @@ Pick whichever path fits your environment:
 cargo install cargo-impact
 
 # 2. Pinned from source by tag (works today, no crates.io dependency)
-cargo install --git https://github.com/asmuelle/cargo-impact --tag v0.3.0-alpha.1
+cargo install --git https://github.com/asmuelle/cargo-impact --tag v0.3.0
 
 # 3. Prebuilt binary from the GitHub release page
 #    https://github.com/asmuelle/cargo-impact/releases
@@ -156,7 +156,7 @@ Every finding carries a tier. This replaces the fiction that static analysis is 
 
 ## 4. CLI Interface (UX)
 
-Flags below reflect the shipping v0.3-alpha surface — `--context`, `--features`, and the `mcp` subcommand are all live. Flags still in flight: `--checklist` (the verification checklist is currently embedded inside `--format markdown` rather than a dedicated output), `--feature-powerset` (CI-grade matrix analysis, v0.4 scope). See §11 for the full roadmap.
+Flags below reflect the shipping v0.3.0 surface — `--context`, `--features`, and the `mcp` subcommand are all live. Flags still in flight: `--checklist` (the verification checklist is currently embedded inside `--format markdown` rather than a dedicated output), `--feature-powerset` (CI-grade matrix analysis, v0.4 scope). See §11 for the full roadmap.
 
 ```bash
 # Analyze the current working tree against HEAD
@@ -520,7 +520,7 @@ The spec is deliberately ambitious. These milestones are the cut points where th
 ### v0.3 — "Agent-native"
 **Goal:** First-class AI integration. The tool is now consumed by agents, not just humans.
 
-*   ✅ MCP server (`cargo impact mcp`) — all six §8 tools (`impact_analyze`, `impact_test_filter`, `impact_surface`, `impact_semver`, `impact_explain`, `impact_version`) ship in v0.3-alpha.1.
+*   ✅ MCP server (`cargo impact mcp`) — all six §8 tools (`impact_analyze`, `impact_test_filter`, `impact_surface`, `impact_semver`, `impact_explain`, `impact_version`) ship in v0.3.0.
 *   ✅ Rust-analyzer integration for the `Proven` tier — LSP stdio client with Content-Length framing, initialize handshake, indexing-progress wait, `documentSymbol` + `references` queries, emitting `ResolvedReference` findings at `Tier::Proven`.
 *   ✅ Content-hashed finding IDs so `impact_explain` can round-trip by ID across runs.
 *   ✅ `--context` bridge to `cargo-context` (forward-flow shipped via `cargo-context --files-from -`; JSON-envelope `--impact-scope` still deferred)
