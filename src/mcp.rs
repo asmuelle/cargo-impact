@@ -20,27 +20,27 @@
 //! * `tools/call` — dispatches to the named tool.
 //! * `shutdown` / `exit` — graceful termination.
 //!
-//! Tools exposed
-//! -------------
+//! Tools exposed (all six from README §8)
+//! --------------------------------------
 //! * `impact_analyze` — run the full blast-radius analysis. Accepts the
 //!   common args (`since`, `confidence_min`, `features`, `all_features`,
 //!   `no_default_features`, `semver_checks`, `rust_analyzer`,
 //!   `manifest_dir`). Returns the same JSON envelope the CLI emits under
-//!   `--format json` — a single `content` entry of type `text` holding
-//!   the serialized report.
+//!   `--format json`.
 //! * `impact_test_filter` — shortcut for the `cargo-nextest` filter
 //!   expression. Same input args, returns the filter string.
+//! * `impact_surface` — project the report to runtime surface findings
+//!   (FFI signatures, `build.rs` changes, trait impls, derive impls)
+//!   with the full `impact_analyze` JSON shape minus non-surface kinds.
+//! * `impact_semver` — project the report to `cargo-semver-checks`
+//!   findings. Forces `semver_checks = true` so agents always get an
+//!   answer even if the caller didn't pre-configure it.
+//! * `impact_explain` — given a finding ID (content-hashed and stable
+//!   across runs), re-run `analyze()` and return the matching finding's
+//!   full detail. Lets agents drill into a specific signal without
+//!   re-emitting the entire report.
 //! * `impact_version` — smoke-test tool that returns the crate version.
 //!   Agents call this first to verify the server is alive.
-//!
-//! Scope note
-//! ----------
-//! The README §8 spec enumerates six tools; three of those are
-//! specializations of `impact_analyze` (surface, semver, checklist) that
-//! an agent can derive from the same report. `explain` needs stable
-//! finding IDs across calls, which is a v0.3+ design question (cache
-//! by content hash?). Starting with three concrete, non-overlapping
-//! tools keeps the alpha surface small and verifiable.
 
 use crate::{analyze, render_report, AnalysisReport, Format, ImpactArgs};
 use anyhow::Result;
@@ -129,6 +129,54 @@ fn tools_list_result() -> Value {
                      covering only the tests that reference changed symbols. Empty \
                      when nothing would be affected.",
                 "inputSchema": input_schema_analyze()
+            },
+            {
+                "name": "impact_surface",
+                "description":
+                    "Project the blast radius to runtime-surface findings only: FFI \
+                     signature changes, build.rs changes, hand-written trait impls, \
+                     and derive-macro impls. Useful when an agent wants to reason \
+                     about what ships to downstream consumers, not about internal \
+                     test coverage.",
+                "inputSchema": input_schema_analyze()
+            },
+            {
+                "name": "impact_semver",
+                "description":
+                    "Run cargo-semver-checks (forcing it on regardless of whether \
+                     the caller passed `semver_checks`) and return the resulting \
+                     findings. Requires cargo-semver-checks on PATH; returns an \
+                     empty findings list with a stderr note if missing.",
+                "inputSchema": input_schema_analyze()
+            },
+            {
+                "name": "impact_explain",
+                "description":
+                    "Look up a single finding by its content-hashed ID (as emitted \
+                     by `impact_analyze`) and return its full detail — kind payload, \
+                     evidence, suggested action, severity, tier, confidence. IDs are \
+                     stable across runs, so agents can store the ID from one call \
+                     and round-trip it in a later call.",
+                "inputSchema": json!({
+                    "type": "object",
+                    "required": ["finding_id"],
+                    "properties": {
+                        "finding_id": {
+                            "type": "string",
+                            "description": "Content-hashed finding ID like `f-abcd1234...`."
+                        },
+                        "since": { "type": "string" },
+                        "features": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "all_features": { "type": "boolean" },
+                        "no_default_features": { "type": "boolean" },
+                        "semver_checks": { "type": "boolean" },
+                        "rust_analyzer": { "type": "boolean" },
+                        "manifest_dir": { "type": "string" }
+                    }
+                })
             },
             {
                 "name": "impact_version",
@@ -247,6 +295,49 @@ fn call_tool(params: &Value) -> Result<Value> {
             let filter = crate::nextest_filter(&report.findings);
             Ok(text_content(&filter))
         }
+        "impact_surface" => {
+            let args: AnalyzeArgs = serde_json::from_value(arguments)?;
+            let impact_args = args.into_impact_args();
+            let mut report = analyze(&impact_args)?;
+            report.findings.retain(|f| {
+                matches!(
+                    f.kind.tag(),
+                    "ffi_signature_change"
+                        | "build_script_changed"
+                        | "trait_impl"
+                        | "derived_trait_impl"
+                )
+            });
+            Ok(text_content(&render_json_report(&impact_args, &report)?))
+        }
+        "impact_semver" => {
+            let args: AnalyzeArgs = serde_json::from_value(arguments)?;
+            let mut impact_args = args.into_impact_args();
+            // Force-enable so agents always get a semver answer from this
+            // tool, even if the call didn't explicitly set it.
+            impact_args.semver_checks = true;
+            let mut report = analyze(&impact_args)?;
+            report.findings.retain(|f| f.kind.tag() == "semver_check");
+            Ok(text_content(&render_json_report(&impact_args, &report)?))
+        }
+        "impact_explain" => {
+            let finding_id = arguments
+                .get("finding_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("missing finding_id"))?
+                .to_string();
+            let explain_args: AnalyzeArgs = serde_json::from_value(arguments)?;
+            let impact_args = explain_args.into_impact_args();
+            let report = analyze(&impact_args)?;
+            match report.findings.into_iter().find(|f| f.id == finding_id) {
+                Some(f) => Ok(text_content(&serde_json::to_string_pretty(&f)?)),
+                None => anyhow::bail!(
+                    "finding `{finding_id}` not present in current report. IDs are \
+                     content-hashed and stable across runs, so absence here means \
+                     the underlying code change no longer produces this finding."
+                ),
+            }
+        }
         other => anyhow::bail!("unknown tool: {other}"),
     }
 }
@@ -318,18 +409,43 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_returns_three_tools() {
+    fn tools_list_returns_all_six_tools() {
         let resp = run_one(json!({
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/list"
         }));
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 6);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert!(names.contains(&"impact_analyze"));
-        assert!(names.contains(&"impact_test_filter"));
-        assert!(names.contains(&"impact_version"));
+        for expected in [
+            "impact_analyze",
+            "impact_test_filter",
+            "impact_surface",
+            "impact_semver",
+            "impact_explain",
+            "impact_version",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "tools/list missing `{expected}`; got {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn impact_explain_rejects_missing_finding_id() {
+        let resp = run_one(json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": { "name": "impact_explain", "arguments": {} }
+        }));
+        let msg = resp["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("finding_id"),
+            "expected missing-id error; got: {msg:?}"
+        );
     }
 
     #[test]

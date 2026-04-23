@@ -146,10 +146,7 @@ fn trait_signature_change_emits_high_severity_findings() {
         "expected findings for a trait signature change; got none"
     );
 
-    let kinds: Vec<&str> = findings
-        .iter()
-        .filter_map(|f| f["kind"].as_str())
-        .collect();
+    let kinds: Vec<&str> = findings.iter().filter_map(|f| f["kind"].as_str()).collect();
     assert!(
         kinds.contains(&"trait_definition_change"),
         "expected trait_definition_change finding; kinds = {kinds:?}"
@@ -182,10 +179,7 @@ fn fail_on_high_exits_nonzero_when_high_severity_finding_present() {
              impl Greeter for F { fn hi(&self, n: u32) { let _ = n; } }\n",
         )],
     );
-    let (_stdout, code) = run_impact(
-        dir.path(),
-        &["--format", "json", "--fail-on", "high"],
-    );
+    let (_stdout, code) = run_impact(dir.path(), &["--format", "json", "--fail-on", "high"]);
     assert_eq!(code, 1, "--fail-on high should trip on trait sig change");
 }
 
@@ -297,13 +291,22 @@ fn json_output_schema_is_stable() {
     // If these fields ever need to change, update the schema document in
     // README §8 first, then update this assertion.
     let dir = seed_repo(
-        &[("Cargo.toml", manifest()), ("src/lib.rs", "pub fn a() {}\n")],
+        &[
+            ("Cargo.toml", manifest()),
+            ("src/lib.rs", "pub fn a() {}\n"),
+        ],
         &[("src/lib.rs", "pub fn a() { let _ = 1; }\n")],
     );
     let (stdout, _code) = run_impact(dir.path(), &["--format", "json"]);
     let report: Value = serde_json::from_str(&stdout).expect("parse JSON");
 
-    for field in ["version", "changed_files", "candidate_symbols", "findings", "summary"] {
+    for field in [
+        "version",
+        "changed_files",
+        "candidate_symbols",
+        "findings",
+        "summary",
+    ] {
         assert!(
             !report[field].is_null(),
             "JSON envelope missing required field `{field}`; got:\n{stdout}"
@@ -316,4 +319,3 @@ fn json_output_schema_is_stable() {
         );
     }
 }
-

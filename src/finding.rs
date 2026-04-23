@@ -7,6 +7,8 @@
 //! into the markdown/text reports.
 
 use serde::Serialize;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 /// Confidence tier per README §3F.
@@ -136,6 +138,16 @@ pub enum FindingKind {
     /// own output verbatim so consumers can surface it without a
     /// re-invocation.
     SemverCheck { level: String, details: String },
+    /// A name-resolved reference to a changed symbol, emitted by the
+    /// rust-analyzer LSP integration. These are the *only* findings that
+    /// legitimately reach the `Proven` tier in this release — the syn-only
+    /// analyzers (TestReference, TraitImpl, DerivedTraitImpl, etc.) top out
+    /// at `Likely` because they can't prove name resolution without a
+    /// compiler front-end.
+    ResolvedReference {
+        source_symbol: String,
+        target: Location,
+    },
     /// A specific, per-method change inside a trait definition. Complements
     /// `TraitImpl` (which flags every impl of a changed trait at blanket
     /// precision) by explaining *what* about the trait changed — required
@@ -243,7 +255,9 @@ impl FindingKind {
             | Self::DerivedTraitImpl { .. }
             | Self::FfiSignatureChange { .. }
             | Self::BuildScriptChanged { .. } => SeverityClass::High,
-            Self::TestReference { .. } | Self::DynDispatch { .. } => SeverityClass::Medium,
+            Self::TestReference { .. }
+            | Self::DynDispatch { .. }
+            | Self::ResolvedReference { .. } => SeverityClass::Medium,
             Self::DocDriftLink { .. } | Self::DocDriftKeyword { .. } => SeverityClass::Low,
             Self::SemverCheck { level, .. } => match level.as_str() {
                 "breaking" => SeverityClass::High,
@@ -267,6 +281,7 @@ impl FindingKind {
             Self::BuildScriptChanged { .. } => "build_script_changed",
             Self::SemverCheck { .. } => "semver_check",
             Self::TraitDefinitionChange { .. } => "trait_definition_change",
+            Self::ResolvedReference { .. } => "resolved_reference",
         }
     }
 }
@@ -309,6 +324,28 @@ impl Finding {
             evidence: evidence.into(),
             suggested_action: None,
         }
+    }
+
+    /// Stable, deterministic ID derived from the finding's content. Same
+    /// finding across two runs produces the same ID — this is what lets
+    /// `impact_explain` round-trip. Call after the finding's final
+    /// kind/evidence are set but before the ID is assigned.
+    ///
+    /// Hash inputs: kind tag + evidence + the kind payload (formatted via
+    /// `{:?}` on the serde-derived Debug). `DefaultHasher` is non-
+    /// cryptographic but that's fine — we're deduping, not proving
+    /// non-existence.
+    pub fn content_id(&self) -> String {
+        let mut hasher = DefaultHasher::new();
+        self.kind.tag().hash(&mut hasher);
+        self.evidence.hash(&mut hasher);
+        // serde_json serialization is stable across runs for our data and
+        // captures kind-specific fields (trait_name, file, etc.) without
+        // needing per-variant hand-plumbing.
+        if let Ok(payload) = serde_json::to_string(&self.kind) {
+            payload.hash(&mut hasher);
+        }
+        format!("f-{:016x}", hasher.finish())
     }
 
     pub fn with_severity(mut self, severity: SeverityClass) -> Self {

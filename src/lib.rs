@@ -277,26 +277,29 @@ fn analyze_inner(args: &ImpactArgs, root: &std::path::Path) -> Result<AnalysisRe
         Err(e) => eprintln!("cargo-impact: semver-checks failed: {e:#}"),
     }
 
-    match rust_analyzer::run(root, &args.since, args.rust_analyzer) {
+    match rust_analyzer::run(root, &changed_files, &symbol_names, args.rust_analyzer) {
         Ok(hits) => findings.extend(hits),
         Err(e) => eprintln!("cargo-impact: rust-analyzer failed: {e:#}"),
     }
 
     findings.retain(|f| f.confidence >= args.confidence_min);
 
-    // Stable sort: severity, then tier, then kind, then evidence — IDs
-    // assigned after this order are deterministic across runs.
+    // Assign content-hashed IDs *before* sorting so the same finding
+    // receives the same ID across runs — required for impact_explain to
+    // round-trip by ID. Ties on (severity, tier, kind, evidence) are
+    // broken by ID as a deterministic last-resort key.
+    for f in &mut findings {
+        f.id = f.content_id();
+    }
+
     findings.sort_by(|a, b| {
         a.severity
             .cmp(&b.severity)
             .then_with(|| b.tier.rank().cmp(&a.tier.rank()))
             .then_with(|| a.kind.tag().cmp(b.kind.tag()))
             .then_with(|| a.evidence.cmp(&b.evidence))
+            .then_with(|| a.id.cmp(&b.id))
     });
-
-    for (i, f) in findings.iter_mut().enumerate() {
-        f.id = format!("f-{:04}", i + 1);
-    }
 
     let mut candidate_symbols: Vec<String> = symbol_names.into_iter().collect();
     candidate_symbols.sort();
