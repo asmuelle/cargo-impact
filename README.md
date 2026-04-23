@@ -69,12 +69,16 @@ Make a change, re-run, and you'll get the severity-grouped report. `cargo impact
 
 ### Typical AI loop
 ```bash
-cargo impact --context | xargs cat     # 1. Emit blast-radius file contents
-# ... feed output to AI, have it generate a patch, apply it ...
+cargo impact --context \               # 1. Feed cargo-context just the
+  | cargo context --files-from -       #    files inside the blast radius
+# ... give the pack to your AI, have it generate a patch, apply it ...
 cargo impact --format markdown         # 2. Get the verification checklist
 # ... AI ticks items, flags what it cannot verify ...
 cargo impact --test                    # 3. Run only the affected tests
 ```
+
+(Without `cargo-context` installed, `cargo impact --context | xargs cat` is a
+plain-text fallback — see §7 for the full integration story.)
 
 For agent-native consumption, start the MCP server: `cargo impact mcp` speaks JSON-RPC 2.0 over stdio with all six tools from §8.
 
@@ -152,7 +156,7 @@ Every finding carries a tier. This replaces the fiction that static analysis is 
 
 ## 4. CLI Interface (UX)
 
-The flags and output described below reflect the shipping v0.2 surface. Flags for features still in flight (`--checklist`, `--context`, `--features`, `--feature-powerset`, `--format=mcp`) are called out in the roadmap (§11) and not listed here to avoid misrepresenting the current binary.
+Flags below reflect the shipping v0.3-alpha surface — `--context`, `--features`, and the `mcp` subcommand are all live. Flags still in flight: `--checklist` (the verification checklist is currently embedded inside `--format markdown` rather than a dedicated output), `--feature-powerset` (CI-grade matrix analysis, v0.4 scope). See §11 for the full roadmap.
 
 ```bash
 # Analyze the current working tree against HEAD
@@ -322,29 +326,32 @@ cargo context --fix | pbcopy         # AI gets context, generates patch
 cargo impact                         # analyze what the patch touched
 ```
 
-### Reverse flow: Impact → Context
-When `cargo-impact` flags uncertain findings (`Likely` / `Unknown` tiers), pipe them back into `cargo-context` to give the AI a second, targeted context pack for the affected surface:
+### Reverse flow: Impact → Context ✅ shipped
+`cargo-impact --context` emits a deduped, newline-delimited list of every file implicated in the blast radius (changed files + each finding's primary path). `cargo-context --files-from -` consumes that list directly and builds a context pack scoped to exactly those files:
 
 ```bash
-cargo impact --context --confidence-max=0.9 \
-  | cargo context --stdin --budget=8000 \
+cargo impact --context \
+  | cargo context --files-from - \
   | pbcopy
-# Feeds AI: "Here are the files cargo-impact is unsure about — re-verify."
+# Pack contains only the blast-radius files, not the whole repo.
 ```
 
-### Scope-limited context packs
-`cargo context` can take an impact report as a filter, producing a context pack scoped to just the affected modules instead of the full diff neighborhood:
+`cargo-context` applies its usual scrubber to each path (so `.env` etc. never leak raw secrets), skips missing paths with an accounting header, and prioritizes the scoped section at diff-level priority so it survives `--budget` pressure. Implementation: [cargo-context#5](https://github.com/asmuelle/cargo-context/issues/5).
+
+### Scope-limited context packs ⏳ deferred
+Passing the full `cargo-impact` JSON envelope (not just file paths) so `cargo-context` can prioritize by confidence tier, filter out findings already verified elsewhere, or emit per-finding mini-packs. Tracked as the second half of [cargo-context#5](https://github.com/asmuelle/cargo-context/issues/5).
 
 ```bash
+# Once shipped:
 cargo impact --format=json > .impact.json
-cargo context --impact-scope=.impact.json   # pack contains only files in the blast radius
+cargo context --impact-scope=.impact.json   # per-finding packs
 ```
 
-### Shared cache
-Both tools read and write `target/ai-tools-cache/` with namespaced subdirectories (`context/`, `impact/`). Symbol indices built by rust-analyzer are shared — `cargo-impact` does not rebuild what `cargo-context` already indexed in the same session.
+### Shared cache ⏳ deferred
+The spec imagined both tools reading `target/ai-tools-cache/` with namespaced subdirectories (`context/`, `impact/`) so rust-analyzer's index is built once and shared. Neither tool ships this yet; each maintains its own cache. A real implementation needs the cache format versioned independently of both tools — tracked for a joint v0.4.
 
-### Shared MCP server
-When both tools are installed, a single `cargo-ai-tools` MCP server exposes both tool families under one process (see §8). An AI agent connects once, gets both.
+### Shared MCP server ⏳ deferred
+Combined `cargo-ai-tools` MCP server that exposes both families under one process (see §8 for the cargo-impact side). Also v0.4+.
 
 ---
 
@@ -516,7 +523,7 @@ The spec is deliberately ambitious. These milestones are the cut points where th
 *   ✅ MCP server (`cargo impact mcp`) — all six §8 tools (`impact_analyze`, `impact_test_filter`, `impact_surface`, `impact_semver`, `impact_explain`, `impact_version`) ship in v0.3-alpha.1.
 *   ✅ Rust-analyzer integration for the `Proven` tier — LSP stdio client with Content-Length framing, initialize handshake, indexing-progress wait, `documentSymbol` + `references` queries, emitting `ResolvedReference` findings at `Tier::Proven`.
 *   ✅ Content-hashed finding IDs so `impact_explain` can round-trip by ID across runs.
-*   ⏳ `--context` bridge to `cargo-context`
+*   ✅ `--context` bridge to `cargo-context` (forward-flow shipped via `cargo-context --files-from -`; JSON-envelope `--impact-scope` still deferred)
 *   ⏳ Framework adapters: `axum`, `clap` (reference implementations); documented adapter trait for third parties
 *   ⏳ `cargo impact log-miss` for ground-truth collection
 *   ⏳ Token budgeting on markdown output

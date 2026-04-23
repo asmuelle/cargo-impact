@@ -146,12 +146,12 @@ pub struct ImpactArgs {
 
     /// Emit a newline-delimited list of files implicated by the blast
     /// radius (one repo-relative path per line) instead of the normal
-    /// report. Suitable for piping to
-    /// [`cargo-context`](https://github.com/asmuelle/cargo-context)
-    /// once it gains a `--files-from -` flag (tracked at
-    /// `asmuelle/cargo-context#5`), or to `xargs cat` / `grep -l` /
-    /// any tool that consumes a file list. Unique paths only.
-    /// Overrides `--format` and `--test`.
+    /// report. Pipes directly into
+    /// [`cargo-context`](https://github.com/asmuelle/cargo-context)'s
+    /// `--files-from -` flag for the canonical handoff:
+    /// `cargo impact --context | cargo context --files-from -`.
+    /// Also consumable by any file-list tool (`xargs cat`, `grep -l`,
+    /// etc.). Unique paths only. Overrides `--format` and `--test`.
     #[arg(long)]
     pub context: bool,
 
