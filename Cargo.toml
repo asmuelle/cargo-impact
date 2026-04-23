@@ -1,6 +1,6 @@
 [package]
 name = "cargo-impact"
-version = "0.2.1"
+version = "0.3.0-alpha.1"
 edition = "2021"
 rust-version = "1.82"
 description = "Blast-radius analysis and selective test execution for Rust workspaces"
@@ -24,6 +24,7 @@ toml = { version = "0.8", default-features = false, features = ["parse"] }
 walkdir = "2"
 
 [dev-dependencies]
+serde_json = "1"
 tempfile = "3"
 
 [profile.release]

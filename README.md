@@ -506,13 +506,13 @@ The spec is deliberately ambitious. These milestones are the cut points where th
 ### v0.3 — "Agent-native"
 **Goal:** First-class AI integration. The tool is now consumed by agents, not just humans.
 
-*   MCP server (`cargo impact mcp`) with the six tools from §8
-*   `--context` bridge to `cargo-context`
-*   `impact.explain` drill-down
-*   Framework adapters: `axum`, `clap` (reference implementations); documented adapter trait for third parties
-*   `cargo impact log-miss` for ground-truth collection
-*   Token budgeting on markdown output
-*   Configuration file (`cargo-impact.toml`) + `.impactignore`
+*   ⚠ MCP server (`cargo impact mcp`) — three of the six §8 tools ship in v0.3-alpha.1 (`impact_analyze`, `impact_test_filter`, `impact_version`). `impact_surface`, `impact_semver`, `impact_explain` still to come.
+*   ⚠ Rust-analyzer integration for the `Proven` tier — flag (`--rust-analyzer`) and PATH detection shipped; full LSP reference-finding still under construction.
+*   ⏳ `--context` bridge to `cargo-context`
+*   ⏳ Framework adapters: `axum`, `clap` (reference implementations); documented adapter trait for third parties
+*   ⏳ `cargo impact log-miss` for ground-truth collection
+*   ⏳ Token budgeting on markdown output
+*   ⏳ Configuration file (`cargo-impact.toml`) + `.impactignore`
 
 **Success metric:** A Claude Code / Cursor session can complete a non-trivial Rust refactor using only MCP tool calls — no shell output parsing, no manual context assembly.
 

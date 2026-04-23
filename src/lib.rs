@@ -44,7 +44,9 @@ mod ffi;
 pub mod finding;
 pub mod format;
 mod git;
+pub mod mcp;
 mod nextest;
+mod rust_analyzer;
 mod semver_checks;
 mod symbols;
 mod tests_scan;
@@ -101,6 +103,14 @@ pub struct ImpactArgs {
     #[arg(long)]
     pub semver_checks: bool,
 
+    /// Opt in to `rust-analyzer`-backed analysis for `Proven`-tier findings.
+    /// v0.3-alpha scaffolding: the flag is wired through and the tool's
+    /// presence on `PATH` is detected, but the LSP integration itself is a
+    /// stub that returns no findings. Full implementation lands in a
+    /// follow-up v0.3 release (see README §11).
+    #[arg(long)]
+    pub rust_analyzer: bool,
+
     /// Activate these Cargo features for cfg evaluation. Accepts a
     /// comma-separated list and/or repeated flags. Takes precedence over
     /// the manifest's `default` set and is unioned with it unless
@@ -143,11 +153,27 @@ impl FailOn {
     }
 }
 
-/// Run the analysis and print the configured output. Returns `Ok(exit_code)`
-/// where a non-zero code indicates `--fail-on` triggered; errors during
-/// analysis (I/O, git, parse failures in the orchestrator) propagate via the
-/// `Result` and map to exit code 2 in `main`.
-pub fn run(args: &ImpactArgs) -> Result<i32> {
+/// Result of running every analyzer against the workspace. Produced by
+/// [`analyze`] and consumed by both the CLI ([`run`]) and the MCP server
+/// ([`mcp::serve`](crate::mcp::serve)).
+///
+/// Findings already carry stable IDs, are sorted by severity / tier, and
+/// have been filtered against `args.confidence_min` — downstream renderers
+/// can emit them directly.
+#[derive(Debug, Clone)]
+pub struct AnalysisReport {
+    pub changed_files: Vec<PathBuf>,
+    pub candidate_symbols: Vec<String>,
+    pub findings: Vec<Finding>,
+}
+
+/// Run every analyzer and return a structured report.
+///
+/// This is the single source of truth for "what does cargo-impact think
+/// about this diff?" — [`run`] wraps it with CLI printing / exit-code
+/// handling, the MCP server serializes its output into JSON content, and
+/// integration tests call it directly.
+pub fn analyze(args: &ImpactArgs) -> Result<AnalysisReport> {
     let root = match &args.manifest_dir {
         Some(p) => p.clone(),
         None => std::env::current_dir().context("reading current directory")?,
@@ -156,48 +182,28 @@ pub fn run(args: &ImpactArgs) -> Result<i32> {
     // Resolve features once, install as thread-local for the whole analyzer
     // block. `cfg::parse_and_filter` — used by every analyzer in place of
     // `syn::parse_file` — reads the thread-local to strip items whose cfg
-    // gates don't match. `FeatureSet::Permissive` (the v0.1 behavior) is
-    // returned when the user passes no feature flags and no manifest is
-    // readable, so existing tests and workflows keep working untouched.
+    // gates don't match.
     let features = cfg::resolve_features(
         &root,
         &args.features,
         args.no_default_features,
         args.all_features,
     )?;
-    cfg::with_features(features, || run_inner(args, &root))
+    cfg::with_features(features, || analyze_inner(args, &root))
 }
 
-fn run_inner(args: &ImpactArgs, root: &std::path::Path) -> Result<i32> {
+fn analyze_inner(args: &ImpactArgs, root: &std::path::Path) -> Result<AnalysisReport> {
     let changed_files = git::changed_rust_files(root, &args.since)?;
     if changed_files.is_empty() {
-        if args.test {
-            println!();
-        } else if matches!(args.format, Format::Text) {
-            println!(
-                "cargo-impact: no Rust files changed relative to {}",
-                args.since
-            );
-        } else {
-            // Structured empty report so agents don't have to special-case
-            // "no output" vs. "no changes".
-            let out = render_report(args.format, &[], &[], &[])?;
-            println!("{out}");
-        }
-        return Ok(0);
+        return Ok(AnalysisReport {
+            changed_files,
+            candidate_symbols: Vec::new(),
+            findings: Vec::new(),
+        });
     }
 
-    // Collect symbols per changed file, diff-aware when possible:
-    //
-    //   1. Try `diff::diff_file` to get the *actually-changed* top-level
-    //      items (Added/Removed/Modified) between `since` and the working
-    //      tree. Narrower candidate set → fewer false positives downstream.
-    //   2. If the diff can't be computed (new file outside HEAD, parse
-    //      failure on either side, non-git checkout), fall back to the v0.1
-    //      blanket approach: every top-level item in the file is a candidate.
-    //
-    // Parse errors on the working-tree side are logged once and the file is
-    // skipped — a single bad file must not kill the whole run.
+    // Collect symbols per changed file, diff-aware when possible; fall back
+    // to blanket file-level analysis when the diff can't be computed.
     let mut all_symbols: Vec<symbols::TopLevelSymbol> = Vec::new();
     for rel in &changed_files {
         match diff::diff_file(root, rel, &args.since) {
@@ -222,8 +228,6 @@ fn run_inner(args: &ImpactArgs, root: &std::path::Path) -> Result<i32> {
     let symbol_names: BTreeSet<String> = all_symbols.iter().map(|s| s.name.clone()).collect();
     let changed_trait_names = traits::changed_trait_names(&all_symbols);
 
-    // Run analyzers. Each returns findings with empty IDs which the
-    // orchestrator assigns sequentially below.
     let mut findings = Vec::new();
     findings.extend(tests_scan::find_affected_tests(root, &symbol_names)?);
     findings.extend(traits::find_trait_impls(root, &changed_trait_names)?);
@@ -234,7 +238,6 @@ fn run_inner(args: &ImpactArgs, root: &std::path::Path) -> Result<i32> {
     )?);
     findings.extend(doc_drift::find_doc_drift(root, &symbol_names)?);
 
-    // FFI signature diff — per-file.
     for rel in &changed_files {
         match ffi::find_ffi_changes(root, rel, &args.since) {
             Ok(hits) => findings.extend(hits),
@@ -242,9 +245,6 @@ fn run_inner(args: &ImpactArgs, root: &std::path::Path) -> Result<i32> {
         }
     }
 
-    // Per-method trait ripple classification (complements the blanket
-    // TraitImpl scan above by explaining *what* about each trait changed).
-    // §3B: required vs default, added vs removed, sig vs body, supertraits.
     for rel in &changed_files {
         match trait_methods::classify_changes_in_file(root, rel, &args.since) {
             Ok(records) => findings.extend(records.into_iter().map(|r| r.into_finding())),
@@ -255,7 +255,6 @@ fn run_inner(args: &ImpactArgs, root: &std::path::Path) -> Result<i32> {
         }
     }
 
-    // `build.rs` changes get a dedicated high-severity finding each.
     for rel in &changed_files {
         let is_build_rs = rel
             .file_name()
@@ -273,18 +272,20 @@ fn run_inner(args: &ImpactArgs, root: &std::path::Path) -> Result<i32> {
         }
     }
 
-    // Opt-in public-API breakage analysis via cargo-semver-checks.
     match semver_checks::run(root, &args.since, args.semver_checks) {
         Ok(hits) => findings.extend(hits),
         Err(e) => eprintln!("cargo-impact: semver-checks failed: {e:#}"),
     }
 
-    // Filter by confidence before assigning IDs so IDs are stable for the
-    // visible findings.
+    match rust_analyzer::run(root, &args.since, args.rust_analyzer) {
+        Ok(hits) => findings.extend(hits),
+        Err(e) => eprintln!("cargo-impact: rust-analyzer failed: {e:#}"),
+    }
+
     findings.retain(|f| f.confidence >= args.confidence_min);
 
-    // Stable sort: severity (High first), then tier (Proven first), then by
-    // content so IDs are deterministic across runs.
+    // Stable sort: severity, then tier, then kind, then evidence — IDs
+    // assigned after this order are deterministic across runs.
     findings.sort_by(|a, b| {
         a.severity
             .cmp(&b.severity)
@@ -297,24 +298,52 @@ fn run_inner(args: &ImpactArgs, root: &std::path::Path) -> Result<i32> {
         f.id = format!("f-{:04}", i + 1);
     }
 
-    // Nextest filter short-circuit — ignores format flag.
-    if args.test {
-        println!("{}", nextest::filter_expression(&findings));
+    let mut candidate_symbols: Vec<String> = symbol_names.into_iter().collect();
+    candidate_symbols.sort();
+
+    Ok(AnalysisReport {
+        changed_files,
+        candidate_symbols,
+        findings,
+    })
+}
+
+/// CLI entry: runs [`analyze`], prints the configured format, honors the
+/// `--test` short-circuit and `--fail-on` gate. Returns the intended exit
+/// code (0 = clean / no gate tripped, 1 = `--fail-on` matched).
+pub fn run(args: &ImpactArgs) -> Result<i32> {
+    let report = analyze(args)?;
+
+    if report.changed_files.is_empty() {
+        if args.test {
+            println!();
+        } else if matches!(args.format, Format::Text) {
+            println!(
+                "cargo-impact: no Rust files changed relative to {}",
+                args.since
+            );
+        } else {
+            let out = render_report(args.format, &[], &[], &[])?;
+            println!("{out}");
+        }
         return Ok(0);
     }
 
-    let sorted_symbols: Vec<String> = {
-        let mut v: Vec<String> = symbol_names.into_iter().collect();
-        v.sort();
-        v
-    };
+    if args.test {
+        println!("{}", nextest::filter_expression(&report.findings));
+        return Ok(0);
+    }
 
-    let out = render_report(args.format, &changed_files, &sorted_symbols, &findings)?;
+    let out = render_report(
+        args.format,
+        &report.changed_files,
+        &report.candidate_symbols,
+        &report.findings,
+    )?;
     println!("{out}");
 
-    // --fail-on evaluation.
     if let Some(gate) = args.fail_on {
-        let tripped = findings.iter().any(|f| gate.triggers(f.severity));
+        let tripped = report.findings.iter().any(|f| gate.triggers(f.severity));
         if tripped {
             return Ok(1);
         }

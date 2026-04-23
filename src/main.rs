@@ -1,5 +1,5 @@
 use anyhow::Result;
-use cargo_impact::{run, ImpactArgs};
+use cargo_impact::{mcp, run, ImpactArgs};
 use clap::Parser;
 
 fn main() -> Result<()> {
@@ -17,6 +17,14 @@ fn main() -> Result<()> {
             }
         })
         .collect();
+
+    // Dispatch the `mcp` subcommand before clap parses against ImpactArgs,
+    // which doesn't know about subcommands. `cargo impact mcp` → MCP stdio
+    // server; anything else → normal analysis path.
+    if args.get(1).is_some_and(|a| a == "mcp") {
+        return mcp::serve();
+    }
+
     let parsed = ImpactArgs::parse_from(args);
     let code = run(&parsed)?;
     std::process::exit(code);
