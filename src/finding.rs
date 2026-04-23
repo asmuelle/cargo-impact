@@ -91,6 +91,15 @@ pub enum FindingKind {
         impl_for: String,
         impl_site: Location,
     },
+    /// A `#[derive(TraitName)]` attribute on a struct, enum, or union where
+    /// `TraitName` was defined in a changed file. Treated as an implicit
+    /// impl site — the derive will expand to one at compile time — but
+    /// distinguished from `TraitImpl` so consumers can filter.
+    DerivedTraitImpl {
+        trait_name: String,
+        impl_for: String,
+        derive_site: Location,
+    },
     /// A `dyn TraitName` type reference for a trait whose definition changed.
     DynDispatch { trait_name: String, site: Location },
     /// An intra-doc link like `[`Symbol`]` in a markdown file or `///` comment
@@ -231,6 +240,7 @@ impl FindingKind {
     pub fn default_severity(&self) -> SeverityClass {
         match self {
             Self::TraitImpl { .. }
+            | Self::DerivedTraitImpl { .. }
             | Self::FfiSignatureChange { .. }
             | Self::BuildScriptChanged { .. } => SeverityClass::High,
             Self::TestReference { .. } | Self::DynDispatch { .. } => SeverityClass::Medium,
@@ -249,6 +259,7 @@ impl FindingKind {
         match self {
             Self::TestReference { .. } => "test_reference",
             Self::TraitImpl { .. } => "trait_impl",
+            Self::DerivedTraitImpl { .. } => "derived_trait_impl",
             Self::DynDispatch { .. } => "dyn_dispatch",
             Self::DocDriftLink { .. } => "doc_drift_link",
             Self::DocDriftKeyword { .. } => "doc_drift_keyword",

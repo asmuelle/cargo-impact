@@ -490,7 +490,7 @@ The spec is deliberately ambitious. These milestones are the cut points where th
 ### v0.2 — "Honest blast radius" (in progress — core shipped)
 **Goal:** The report earns the name. Confidence tiers, trait handling, and the first AI-consumable format.
 
-*   ⏳ Macro expansion pass before analysis (`cargo expand` + HIR) — still deferred; nightly toolchain boundary
+*   ⚠ Macro expansion — `#[derive(...)]` now recognized (matched on last path segment, so `serde::Serialize` / `clap::Parser` / etc. all resolve). Full `cargo expand` / HIR pass for attribute and `fn`-like macros still deferred; nightly toolchain boundary
 *   ✅ Trait ripple differentiation (§3B): required vs. default vs. new method — per-method HEAD-vs-WT classification shipping in addition to the blanket `TraitImpl` scan
 *   ✅ `dyn Trait` dispatch edges as `Likely 0.75`
 *   ✅ Confidence tiers (§3F) with numeric scores (`Proven` reserved for v0.3 RA integration)

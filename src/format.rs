@@ -237,6 +237,14 @@ fn finding_summary(f: &Finding) -> String {
             "impl `{trait_name}` for `{impl_for}` ({})",
             impl_site.file.display()
         ),
+        FindingKind::DerivedTraitImpl {
+            trait_name,
+            impl_for,
+            derive_site,
+        } => format!(
+            "`#[derive({trait_name})]` on `{impl_for}` ({})",
+            derive_site.file.display()
+        ),
         FindingKind::DynDispatch { trait_name, site } => {
             format!("`dyn {trait_name}` used in {}", site.file.display())
         }

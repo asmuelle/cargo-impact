@@ -36,6 +36,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 mod cfg;
+mod derive;
 mod diff;
 mod doc_drift;
 mod dyn_dispatch;
@@ -226,6 +227,7 @@ fn run_inner(args: &ImpactArgs, root: &std::path::Path) -> Result<i32> {
     let mut findings = Vec::new();
     findings.extend(tests_scan::find_affected_tests(root, &symbol_names)?);
     findings.extend(traits::find_trait_impls(root, &changed_trait_names)?);
+    findings.extend(derive::find_derive_impls(root, &changed_trait_names)?);
     findings.extend(dyn_dispatch::find_dyn_dispatch_sites(
         root,
         &changed_trait_names,
