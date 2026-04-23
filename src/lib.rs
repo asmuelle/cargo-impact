@@ -38,6 +38,7 @@ use std::path::PathBuf;
 mod adapters;
 mod cfg;
 mod config;
+mod dedup;
 mod derive;
 mod diff;
 mod doc_drift;
@@ -334,6 +335,13 @@ fn analyze_inner(args: &ImpactArgs, root: &std::path::Path) -> Result<AnalysisRe
         Ok(hits) => findings.extend(hits),
         Err(e) => eprintln!("cargo-impact: rust-analyzer failed: {e:#}"),
     }
+
+    // Drop syn-only Likely findings that a Proven RA ResolvedReference
+    // already covers at the same (name, file) pair. Runs before ignore /
+    // confidence filtering and ID assignment so shadowed syn findings
+    // never consume IDs or affect summary counts. No-op when RA is off
+    // or returned nothing.
+    dedup::dedup_syn_under_proven(&mut findings);
 
     // Apply .impactignore filtering before confidence threshold and ID
     // assignment — ignored findings shouldn't consume ID slots or affect
