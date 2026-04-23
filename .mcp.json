@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "cargo-impact": {
+      "command": "cargo-impact",
+      "args": ["mcp"]
+    },
+    "cargo-context": {
+      "command": "cargo-context-mcp"
+    }
+  }
+}
