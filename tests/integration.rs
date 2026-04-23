@@ -75,7 +75,11 @@ fn seed_repo(initial: &[(&str, &str)], modifications: &[(&str, &str)]) -> TempDi
 }
 
 /// Run `cargo-impact` against a fixture root, capturing stdout. Returns
-/// (stdout, exit_code). Never panics on non-zero — tests assert explicitly.
+/// (stdout, exit_code). Never panics on non-zero — tests assert
+/// explicitly. On failure the stderr is eprintln'd so it surfaces in
+/// nextest's per-test output when the caller's assertion fires
+/// (especially useful for Windows CI where we can't pull per-test
+/// logs without repo-admin auth).
 fn run_impact(root: &Path, extra_args: &[&str]) -> (String, i32) {
     let mut cmd = Command::new(binary());
     cmd.arg("--manifest-dir").arg(root);
@@ -84,7 +88,18 @@ fn run_impact(root: &Path, extra_args: &[&str]) -> (String, i32) {
     }
     let output = cmd.output().expect("spawn cargo-impact");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr);
     let code = output.status.code().unwrap_or(-1);
+    // Exit 0 = clean, 1 = --fail-on tripped (expected by one test). Any
+    // other code means cargo-impact itself blew up — surface its stderr.
+    if code != 0 && code != 1 {
+        eprintln!(
+            "cargo-impact exited with code {code}\n\
+             args: --manifest-dir <tmp> {}\n\
+             stderr:\n{stderr}",
+            extra_args.join(" ")
+        );
+    }
     (stdout, code)
 }
 
@@ -274,15 +289,23 @@ fn mcp_version_tool_responds_to_tools_call_over_stdio() {
     drop(child.stdin.take());
 
     let out = child.wait_with_output().expect("wait");
-    assert!(out.status.success(), "mcp server exited non-zero");
-
     let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "mcp server exited non-zero ({:?})\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status.code()
+    );
+
     // Response is one JSON line; parse it.
     let line = stdout
         .lines()
         .find(|l| !l.trim().is_empty())
-        .expect("response line");
-    let resp: Value = serde_json::from_str(line).expect("parse response");
+        .unwrap_or_else(|| {
+            panic!("no response on mcp stdout\nstdout:\n{stdout}\nstderr:\n{stderr}")
+        });
+    let resp: Value = serde_json::from_str(line)
+        .unwrap_or_else(|e| panic!("parse response `{line}`: {e}\nstderr:\n{stderr}"));
     assert_eq!(resp["jsonrpc"], "2.0");
     assert_eq!(resp["id"], 1);
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
