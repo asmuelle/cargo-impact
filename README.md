@@ -506,8 +506,9 @@ The spec is deliberately ambitious. These milestones are the cut points where th
 ### v0.3 — "Agent-native"
 **Goal:** First-class AI integration. The tool is now consumed by agents, not just humans.
 
-*   ⚠ MCP server (`cargo impact mcp`) — three of the six §8 tools ship in v0.3-alpha.1 (`impact_analyze`, `impact_test_filter`, `impact_version`). `impact_surface`, `impact_semver`, `impact_explain` still to come.
-*   ⚠ Rust-analyzer integration for the `Proven` tier — flag (`--rust-analyzer`) and PATH detection shipped; full LSP reference-finding still under construction.
+*   ✅ MCP server (`cargo impact mcp`) — all six §8 tools (`impact_analyze`, `impact_test_filter`, `impact_surface`, `impact_semver`, `impact_explain`, `impact_version`) ship in v0.3-alpha.1.
+*   ✅ Rust-analyzer integration for the `Proven` tier — LSP stdio client with Content-Length framing, initialize handshake, indexing-progress wait, `documentSymbol` + `references` queries, emitting `ResolvedReference` findings at `Tier::Proven`.
+*   ✅ Content-hashed finding IDs so `impact_explain` can round-trip by ID across runs.
 *   ⏳ `--context` bridge to `cargo-context`
 *   ⏳ Framework adapters: `axum`, `clap` (reference implementations); documented adapter trait for third parties
 *   ⏳ `cargo impact log-miss` for ground-truth collection
