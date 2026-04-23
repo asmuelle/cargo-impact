@@ -338,11 +338,11 @@ cargo impact --context \
 
 `cargo-context` applies its usual scrubber to each path (so `.env` etc. never leak raw secrets), skips missing paths with an accounting header, and prioritizes the scoped section at diff-level priority so it survives `--budget` pressure. Implementation: [cargo-context#5](https://github.com/asmuelle/cargo-context/issues/5).
 
-### Scope-limited context packs ⏳ deferred
-Passing the full `cargo-impact` JSON envelope (not just file paths) so `cargo-context` can prioritize by confidence tier, filter out findings already verified elsewhere, or emit per-finding mini-packs. Tracked as the second half of [cargo-context#5](https://github.com/asmuelle/cargo-context/issues/5).
+### Scope-limited context packs ⏳ not scheduled
+Passing the full `cargo-impact` JSON envelope (not just file paths) so `cargo-context` can prioritize by confidence tier, filter out findings already verified elsewhere, or emit per-finding mini-packs. A schema proposal is on record at [cargo-context#5](https://github.com/asmuelle/cargo-context/issues/5#issuecomment-4304409079), but the issue closed without acceptance and no concrete implementation is tracked on either side. Users who need this today can pipe `--format=json` into their own tooling; the envelope shape is stable within v0.3.
 
 ```bash
-# Once shipped:
+# If/when the cargo-context side lands:
 cargo impact --format=json > .impact.json
 cargo context --impact-scope=.impact.json   # per-finding packs
 ```
@@ -523,7 +523,7 @@ The spec is deliberately ambitious. These milestones are the cut points where th
 *   ✅ MCP server (`cargo impact mcp`) — all six §8 tools (`impact_analyze`, `impact_test_filter`, `impact_surface`, `impact_semver`, `impact_explain`, `impact_version`) ship in v0.3.0.
 *   ✅ Rust-analyzer integration for the `Proven` tier — LSP stdio client with Content-Length framing, initialize handshake, indexing-progress wait, `documentSymbol` + `references` queries, emitting `ResolvedReference` findings at `Tier::Proven`.
 *   ✅ Content-hashed finding IDs so `impact_explain` can round-trip by ID across runs.
-*   ✅ `--context` bridge to `cargo-context` (forward-flow shipped via `cargo-context --files-from -`; JSON-envelope `--impact-scope` still deferred)
+*   ✅ `--context` bridge to `cargo-context` (forward-flow shipped via `cargo-context --files-from -`; JSON-envelope `--impact-scope` not scheduled — see §7)
 *   ⏳ Framework adapters: `axum`, `clap` (reference implementations); documented adapter trait for third parties
 *   ⏳ `cargo impact log-miss` for ground-truth collection
 *   ⏳ Token budgeting on markdown output
