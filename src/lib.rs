@@ -54,7 +54,7 @@ mod trait_methods;
 mod traits;
 
 pub use finding::{Finding, FindingKind, Location, SeverityClass, Tier, TierSummary};
-pub use format::{render as render_report, Format};
+pub use format::{render as render_report, render_with_budget, Format};
 pub use nextest::filter_expression as nextest_filter;
 
 /// Command-line arguments for `cargo impact`.
@@ -110,6 +110,19 @@ pub struct ImpactArgs {
     /// follow-up v0.3 release (see README §11).
     #[arg(long)]
     pub rust_analyzer: bool,
+
+    /// Character budget for the rendered output — useful for keeping
+    /// `--format markdown` inside an AI agent's context window. `0` (the
+    /// default) means unlimited. Only affects the markdown renderer;
+    /// text is for human terminals, JSON is for programmatic consumers
+    /// who can filter themselves. Chars ≈ ¼ token for mainstream models
+    /// (claude, gpt-4-ish tokenizers), so `--budget=32000` fits ≈ 8k
+    /// tokens. The header + summary always render even if they alone
+    /// exceed the budget; severity sections and the checklist are
+    /// truncated in priority order (severity → tier → confidence) with
+    /// a footer noting how many findings were dropped.
+    #[arg(long, default_value_t = 0)]
+    pub budget: usize,
 
     /// Activate these Cargo features for cfg evaluation. Accepts a
     /// comma-separated list and/or repeated flags. Takes precedence over
@@ -326,7 +339,7 @@ pub fn run(args: &ImpactArgs) -> Result<i32> {
                 args.since
             );
         } else {
-            let out = render_report(args.format, &[], &[], &[])?;
+            let out = render_with_budget(args.format, &[], &[], &[], args.budget)?;
             println!("{out}");
         }
         return Ok(0);
@@ -337,11 +350,12 @@ pub fn run(args: &ImpactArgs) -> Result<i32> {
         return Ok(0);
     }
 
-    let out = render_report(
+    let out = render_with_budget(
         args.format,
         &report.changed_files,
         &report.candidate_symbols,
         &report.findings,
+        args.budget,
     )?;
     println!("{out}");
 

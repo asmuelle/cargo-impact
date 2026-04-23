@@ -42,7 +42,7 @@
 //! * `impact_version` — smoke-test tool that returns the crate version.
 //!   Agents call this first to verify the server is alive.
 
-use crate::{analyze, render_report, AnalysisReport, Format, ImpactArgs};
+use crate::{analyze, render_with_budget, AnalysisReport, Format, ImpactArgs};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -227,6 +227,15 @@ fn input_schema_analyze() -> Value {
             "manifest_dir": {
                 "type": "string",
                 "description": "Override the workspace root; defaults to cwd."
+            },
+            "budget": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Character budget for the returned markdown or text \
+                                payload. `0` (default) = unlimited. Only applies when \
+                                the tool's output is markdown or text; JSON callers \
+                                can filter themselves. Roughly ¼ token per char for \
+                                mainstream tokenizers."
             }
         }
     })
@@ -253,6 +262,8 @@ struct AnalyzeArgs {
     rust_analyzer: Option<bool>,
     #[serde(default)]
     manifest_dir: Option<String>,
+    #[serde(default)]
+    budget: Option<usize>,
 }
 
 impl AnalyzeArgs {
@@ -269,6 +280,7 @@ impl AnalyzeArgs {
             features: self.features.unwrap_or_default(),
             all_features: self.all_features.unwrap_or(false),
             no_default_features: self.no_default_features.unwrap_or(false),
+            budget: self.budget.unwrap_or(0),
         }
     }
 }
@@ -343,11 +355,12 @@ fn call_tool(params: &Value) -> Result<Value> {
 }
 
 fn render_json_report(args: &ImpactArgs, report: &AnalysisReport) -> Result<String> {
-    render_report(
+    render_with_budget(
         args.format,
         &report.changed_files,
         &report.candidate_symbols,
         &report.findings,
+        args.budget,
     )
 }
 
