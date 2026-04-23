@@ -546,26 +546,52 @@ The spec is deliberately ambitious. These milestones are the cut points where th
 **Success metric:** A Claude Code / Cursor session can complete a non-trivial Rust refactor using only MCP tool calls — no shell output parsing, no manual context assembly.
 
 ### v0.4 — "Production-grade"
-**Goal:** Ready for use in serious CI pipelines and large workspaces.
+**Goal:** A Rust developer can drop `cargo-impact` into their CI pipeline, have it gate PRs, and trust the numbers. Today the tool works on a laptop; v0.4 is when it works in CI.
 
-*   Adapters: `actix-web`, `rocket`, `tauri`, `dioxus`
-*   `--feature-powerset` (CI mode)
-*   Cross-target support (`--target wasm32-unknown-unknown`, `no_std`)
-*   Streaming progress over MCP for long analyses
-*   Deterministic output for reproducible CI artifacts
-*   `cargo-difftests` coverage integration (if stable by then)
-*   Benchmark suite hardening; SLO regression gates in CI
-*   Pre-push and GitHub Actions recipes shipped as templates
+What "production-grade" actually means, broken into concrete cuts.
 
-**Success metric:** Deployable on a 100+ crate workspace with a stable, cached p50 under 2 seconds.
+#### v0.4 core — must ship
+
+The minimum set that makes the CI-gate story real. If v0.4 ships with only these, it's still a meaningful release.
+
+*   **`--format sarif`** — SARIF v2.1.0 output that GitHub code scanning, GitLab security, and every other security-scanner UI already knows how to render. Makes cargo-impact findings appear inline on PR diffs without any custom glue.
+*   **GitHub Actions composite action** — `uses: asmuelle/cargo-impact-action@v1` with sane defaults (runs on PR, uploads SARIF, comments the markdown report). Target: a first-time user can gate their repo with ≤10 lines of YAML.
+*   **PR-comment output mode** — `--format=pr-comment` renders the markdown optimized for GitHub PR comments (collapsed `<details>` per severity, severity-badge headers, `#<N>` cross-links to the SARIF upload). Complements the SARIF path for teams that don't run code scanning.
+*   **Deterministic output** — strip timestamps, pin sort orders, fix format-version strings, make two runs against the same diff byte-identical. Required for any CI that diffs output across runs or caches by content hash.
+*   **Benchmark suite + SLO regression gates** — `cargo bench`-based timing against a fixture matrix (small / medium / large workspace shapes). CI fails if a run exceeds §9's stated p50 + 20%. Today those numbers are aspirational; v0.4 proves or revises them.
+
+**v0.4 core success metric:** A maintainer of a real open-source Rust project (not us) can add cargo-impact to their CI in under 15 minutes following the README, and a PR that breaks a trait contract surfaces as a blocking annotation on their code-scanning UI.
+
+#### v0.4 stretch — ship if the core is solid
+
+Higher-value precision improvements that depend on the core being landed first. Any of these would be individually a meaningful release; we ship whichever are ready.
+
+*   **Full macro expansion via `cargo expand` / HIR** — promotes many `Likely` findings to something closer to `Proven` by resolving serde, tokio, axum, clap, thiserror, and similar derive/attribute-macro outputs. The hardest piece of the precision story still outstanding; see §3A for scope.
+*   **Per-reference severity refinement** — rust-analyzer already knows whether a reference sits inside a `#[test] fn`, an `impl` block, or plain caller code. Use `documentSymbol` hierarchy to walk upward from each `ResolvedReference` and upgrade severity accordingly.
+*   **syn/RA finding dedup and tier upgrade** — when a syn analyzer flags a site `Likely` and RA confirms it at `Proven`, emit one finding at the higher tier, not two findings competing for the same slot. Simple merge pass in the orchestrator.
+*   **`--feature-powerset` (CI mode)** — runs analysis across feature combinations and surfaces findings that the default-feature view missed. Expensive (O(2^N) with feature count); documented as CI-only.
+*   **Streaming progress over MCP** — `$/progress`-style notifications for long analyses so agents see "50 of 200 files analyzed" rather than a 30-second silence.
+*   **More framework adapters** — `actix-web` and `rocket` would be the next-most-requested based on Rust-ecosystem usage. `tauri` / `dioxus` / `leptos` remain on-demand.
+
+#### v0.4 explicit non-goals
+
+Called out here so nobody expects them landing in this milestone — each is a real user-facing request, each is deliberately scoped out.
+
+*   **`no_std` / `wasm32` cross-target support** — genuinely useful, but requires target-triple-aware cfg evaluation and a second analysis pass. Moved to v0.5.
+*   **Polyrepo / cross-workspace** — path dependencies and git dependencies spanning repos. Design work needed before scoping; Beyond-v0.4.
+*   **`git bisect` driver using impact data** — neat, but narrow enough user base to wait for demand.
+*   **`cargo-difftests` coverage integration** — external tool still pre-1.0; fall back to call-graph-only test selection until its shape stabilizes.
+*   **IDE integration (VS Code / Zed)** — users can already get structured output via the MCP server. A dedicated editor extension is Beyond-v0.4.
+*   **Shared `target/ai-tools-cache/` with cargo-context** — depends on maintainer alignment on cache format; treat as v0.5+ joint work.
 
 ### Beyond v0.4
-Uncertain and deliberately unplanned. Candidates (prioritized by user demand, not roadmap):
+Unscheduled, prioritized by demand rather than by us:
 
-*   IDE integration (VS Code extension, Zed)
-*   `git bisect` driver that uses impact data to narrow the search
-*   Historical blast-radius mining from the full repo history (find under-tested hot spots)
+*   IDE integration (VS Code extension, Zed LSP plugin)
+*   `git bisect` driver using impact data to narrow the search
+*   Historical blast-radius mining (find under-tested hot spots across a year of history)
 *   Cross-workspace impact for polyrepo setups with path dependencies
+*   `--impact-scope` JSON-envelope consumer on the cargo-context side (pending cargo-context maintainer scheduling; schema proposal on record at [cargo-context#5](https://github.com/asmuelle/cargo-context/issues/5#issuecomment-4304409079))
 
 ### What could kill each milestone
 Honest risk log, not hand-wave:
@@ -575,7 +601,7 @@ Honest risk log, not hand-wave:
 | v0.1 | `ra_ap_*` API churn between rust-analyzer releases | Pin RA version per release; fall back to LSP protocol if library API breaks |
 | v0.2 | Macro expansion is too slow or too incomplete on real workspaces | Downgrade confidence on unexpanded macros rather than fail; document known-bad proc macros |
 | v0.3 | MCP ecosystem fragments before stabilizing | Ship stdio + Streamable HTTP; keep CLI first-class so tool isn't MCP-dependent |
-| v0.4 | `cargo-difftests` doesn't mature / is abandoned | Fall back to call-graph-only test selection (less precise but still useful) |
+| v0.4 | SARIF shape evolves after we ship; GitHub Actions billing or permissions model changes for the composite action | Target SARIF v2.1.0 (well-established, used by every major scanner); keep `--format=json` as the stable ground truth so SARIF is a downstream renderer; composite action is a thin wrapper with no business logic. `cargo-difftests` specifically — fall back to call-graph-only test selection (less precise but still useful) if that tool doesn't stabilize. |
 
 ---
 
