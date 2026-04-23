@@ -519,14 +519,14 @@ fn collect_document_symbol(sym: &Value, out: &mut Vec<SymbolLoc>) {
         .get("selectionRange")
         .and_then(|r| r.get("start"))
         .or_else(|| sym.get("range").and_then(|r| r.get("start")));
-    if let Some(p) = pos {
-        if !name.is_empty() {
-            out.push(SymbolLoc {
-                name,
-                line: p.get("line").and_then(Value::as_u64).unwrap_or(0) as u32,
-                character: p.get("character").and_then(Value::as_u64).unwrap_or(0) as u32,
-            });
-        }
+    if let Some(p) = pos
+        && !name.is_empty()
+    {
+        out.push(SymbolLoc {
+            name,
+            line: p.get("line").and_then(Value::as_u64).unwrap_or(0) as u32,
+            character: p.get("character").and_then(Value::as_u64).unwrap_or(0) as u32,
+        });
     }
     if let Some(children) = sym.get("children").and_then(Value::as_array) {
         for c in children {

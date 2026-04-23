@@ -71,12 +71,12 @@ struct DynVisitor<'a> {
 impl<'ast> Visit<'ast> for DynVisitor<'_> {
     fn visit_type_trait_object(&mut self, node: &'ast TypeTraitObject) {
         for bound in &node.bounds {
-            if let TypeParamBound::Trait(tb) = bound {
-                if let Some(seg) = tb.path.segments.last() {
-                    let name = seg.ident.to_string();
-                    if self.changed_traits.contains(&name) {
-                        self.hits.insert(name);
-                    }
+            if let TypeParamBound::Trait(tb) = bound
+                && let Some(seg) = tb.path.segments.last()
+            {
+                let name = seg.ident.to_string();
+                if self.changed_traits.contains(&name) {
+                    self.hits.insert(name);
                 }
             }
         }

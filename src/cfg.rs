@@ -115,10 +115,10 @@ pub fn parse_and_filter(src: &str) -> Option<File> {
 fn filter_item_vec(items: &mut Vec<Item>, features: &FeatureSet) {
     items.retain(|item| item_active(item, features));
     for item in items {
-        if let Item::Mod(m) = item {
-            if let Some((_, inner)) = &mut m.content {
-                filter_item_vec(inner, features);
-            }
+        if let Item::Mod(m) = item
+            && let Some((_, inner)) = &mut m.content
+        {
+            filter_item_vec(inner, features);
         }
     }
 }
@@ -147,12 +147,12 @@ fn eval_meta(meta: &Meta, features: &FeatureSet) -> bool {
     match meta {
         // Bare identifiers: cfg(test), cfg(debug_assertions), cfg(miri), ...
         Meta::Path(p) => {
-            if let Some(ident) = p.get_ident() {
-                if ident == "test" {
-                    // Test items must stay visible to the test-scanner
-                    // regardless of the active feature set.
-                    return true;
-                }
+            if let Some(ident) = p.get_ident()
+                && ident == "test"
+            {
+                // Test items must stay visible to the test-scanner
+                // regardless of the active feature set.
+                return true;
             }
             // Everything else we don't model yet: liberal.
             true
@@ -282,14 +282,13 @@ pub fn resolve_features(
     }
 
     let mut active = BTreeSet::new();
-    if !no_default {
-        if let Some(table) = features_table {
-            if let Some(defaults) = table.get("default").and_then(|v| v.as_array()) {
-                for d in defaults.iter().filter_map(|v| v.as_str()) {
-                    if let Some(name) = same_crate_feature_name(d) {
-                        active.insert(name);
-                    }
-                }
+    if !no_default
+        && let Some(table) = features_table
+        && let Some(defaults) = table.get("default").and_then(|v| v.as_array())
+    {
+        for d in defaults.iter().filter_map(|v| v.as_str()) {
+            if let Some(name) = same_crate_feature_name(d) {
+                active.insert(name);
             }
         }
     }

@@ -70,13 +70,12 @@ struct ImplVisitor<'a> {
 
 impl<'ast> Visit<'ast> for ImplVisitor<'_> {
     fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
-        if let Some((_, trait_path, _)) = &node.trait_ {
-            if let Some(trait_name) = last_ident(trait_path) {
-                if self.changed_traits.contains(&trait_name) {
-                    let impl_for = type_to_string(&node.self_ty);
-                    self.hits.push((trait_name, impl_for));
-                }
-            }
+        if let Some((_, trait_path, _)) = &node.trait_
+            && let Some(trait_name) = last_ident(trait_path)
+            && self.changed_traits.contains(&trait_name)
+        {
+            let impl_for = type_to_string(&node.self_ty);
+            self.hits.push((trait_name, impl_for));
         }
         // Still descend in case there are nested modules with more impls.
         syn::visit::visit_item_impl(self, node);
@@ -91,10 +90,10 @@ fn last_ident(path: &SynPath) -> Option<String> {
 /// payload. For the common case `Type::Path(...)` this is the last path
 /// segment; for everything else we fall back to `to_token_stream`.
 fn type_to_string(ty: &Type) -> String {
-    if let Type::Path(TypePath { qself: None, path }) = ty {
-        if let Some(seg) = path.segments.last() {
-            return seg.ident.to_string();
-        }
+    if let Type::Path(TypePath { qself: None, path }) = ty
+        && let Some(seg) = path.segments.last()
+    {
+        return seg.ident.to_string();
     }
     use quote::ToTokens;
     let raw = ty.to_token_stream().to_string();

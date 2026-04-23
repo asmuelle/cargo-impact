@@ -216,12 +216,11 @@ fn find_clap_surfaces(
         match item {
             syn::Item::Struct(s) => {
                 let derives = derive_names(&s.attrs);
-                if let Some(kind) = clap_surface_kind(&derives) {
-                    if changed.contains(&s.ident.to_string())
-                        || any_field_mentions_changed(&s.fields, changed)
-                    {
-                        out.push((s.ident.to_string(), kind));
-                    }
+                if let Some(kind) = clap_surface_kind(&derives)
+                    && (changed.contains(&s.ident.to_string())
+                        || any_field_mentions_changed(&s.fields, changed))
+                {
+                    out.push((s.ident.to_string(), kind));
                 }
             }
             syn::Item::Enum(e) => {

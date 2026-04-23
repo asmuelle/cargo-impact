@@ -197,22 +197,22 @@ fn extract_bracketed(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'[' {
-            if let Some(close) = line[i + 1..].find(']') {
-                let inner = &line[i + 1..i + 1 + close];
-                let after = i + 2 + close;
-                // Skip `[text](url)` — that's a hyperlink, not an intra-doc link.
-                if after < bytes.len() && bytes[after] == b'(' {
-                    i = after;
-                    continue;
-                }
-                let stripped = inner.trim().trim_matches('`');
-                if let Some(ident) = leading_ident(stripped) {
-                    out.push(ident);
-                }
+        if bytes[i] == b'['
+            && let Some(close) = line[i + 1..].find(']')
+        {
+            let inner = &line[i + 1..i + 1 + close];
+            let after = i + 2 + close;
+            // Skip `[text](url)` — that's a hyperlink, not an intra-doc link.
+            if after < bytes.len() && bytes[after] == b'(' {
                 i = after;
                 continue;
             }
+            let stripped = inner.trim().trim_matches('`');
+            if let Some(ident) = leading_ident(stripped) {
+                out.push(ident);
+            }
+            i = after;
+            continue;
         }
         i += 1;
     }

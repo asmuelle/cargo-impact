@@ -100,53 +100,53 @@ impl ConfigFile {
 /// override in that case. This covers the common workflow where users
 /// keep a shared `cargo-impact.toml` and occasionally override one flag.
 pub fn apply_config(defaults: &Defaults, args: &mut ImpactArgs) {
-    if let Some(v) = defaults.confidence_min {
-        if args.confidence_min == 0.0 {
-            args.confidence_min = v;
-        }
+    if let Some(v) = defaults.confidence_min
+        && args.confidence_min == 0.0
+    {
+        args.confidence_min = v;
     }
-    if args.fail_on.is_none() {
-        if let Some(s) = &defaults.fail_on {
-            match s.to_lowercase().as_str() {
-                "high" => args.fail_on = Some(FailOn::High),
-                "medium" => args.fail_on = Some(FailOn::Medium),
-                "low" => args.fail_on = Some(FailOn::Low),
-                other => eprintln!(
-                    "cargo-impact: cargo-impact.toml: invalid `fail_on = \"{other}\"` \
+    if args.fail_on.is_none()
+        && let Some(s) = &defaults.fail_on
+    {
+        match s.to_lowercase().as_str() {
+            "high" => args.fail_on = Some(FailOn::High),
+            "medium" => args.fail_on = Some(FailOn::Medium),
+            "low" => args.fail_on = Some(FailOn::Low),
+            other => eprintln!(
+                "cargo-impact: cargo-impact.toml: invalid `fail_on = \"{other}\"` \
                      (expected `high`, `medium`, or `low`); leaving unset."
-                ),
-            }
+            ),
         }
     }
-    if let Some(v) = defaults.semver_checks {
-        if !args.semver_checks {
-            args.semver_checks = v;
-        }
+    if let Some(v) = defaults.semver_checks
+        && !args.semver_checks
+    {
+        args.semver_checks = v;
     }
-    if let Some(v) = defaults.rust_analyzer {
-        if !args.rust_analyzer {
-            args.rust_analyzer = v;
-        }
+    if let Some(v) = defaults.rust_analyzer
+        && !args.rust_analyzer
+    {
+        args.rust_analyzer = v;
     }
-    if let Some(v) = &defaults.features {
-        if args.features.is_empty() {
-            args.features.clone_from(v);
-        }
+    if let Some(v) = &defaults.features
+        && args.features.is_empty()
+    {
+        args.features.clone_from(v);
     }
-    if let Some(v) = defaults.all_features {
-        if !args.all_features {
-            args.all_features = v;
-        }
+    if let Some(v) = defaults.all_features
+        && !args.all_features
+    {
+        args.all_features = v;
     }
-    if let Some(v) = defaults.no_default_features {
-        if !args.no_default_features {
-            args.no_default_features = v;
-        }
+    if let Some(v) = defaults.no_default_features
+        && !args.no_default_features
+    {
+        args.no_default_features = v;
     }
-    if let Some(v) = defaults.budget {
-        if args.budget == 0 {
-            args.budget = v;
-        }
+    if let Some(v) = defaults.budget
+        && args.budget == 0
+    {
+        args.budget = v;
     }
 }
 
