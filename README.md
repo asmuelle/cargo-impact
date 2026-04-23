@@ -82,6 +82,20 @@ plain-text fallback — see §7 for the full integration story.)
 
 For agent-native consumption, start the MCP server: `cargo impact mcp` speaks JSON-RPC 2.0 over stdio with all six tools from §8.
 
+### Working *on* this repo with Claude Code
+
+If you clone this repo to contribute and open it in Claude Code, you're set up automatically. The committed `.mcp.json` registers both `cargo-impact` and `cargo-context` as MCP servers; `.claude/settings.json` enables them via an explicit allowlist and pre-approves the relevant `cargo impact` / `cargo context` Bash patterns so agents don't hit permission prompts. `CLAUDE.md` at the repo root orients assistants to the project's conventions (MSRV 1.95, edition 2024, honest tiering, the three-check pre-commit gate).
+
+Install both tools from crates.io first, then open the repo:
+
+```bash
+cargo install cargo-impact cargo-context
+cd cargo-impact
+claude   # or code . / zed . with Claude Code configured
+```
+
+Missing either binary degrades gracefully — the MCP runtime logs the unavailable server and skips its tools; nothing else breaks.
+
 ---
 
 ## 3. Technical Architecture
