@@ -155,7 +155,7 @@ impl FailOn {
 
 /// Result of running every analyzer against the workspace. Produced by
 /// [`analyze`] and consumed by both the CLI ([`run`]) and the MCP server
-/// ([`mcp::serve`](crate::mcp::serve)).
+/// (`cargo impact mcp`).
 ///
 /// Findings already carry stable IDs, are sorted by severity / tier, and
 /// have been filtered against `args.confidence_min` — downstream renderers

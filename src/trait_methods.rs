@@ -265,6 +265,9 @@ mod tests {
             &["config", "user.email", "t@t"],
             &["config", "user.name", "t"],
             &["config", "commit.gpgsign", "false"],
+            // Windows git defaults core.autocrlf = true, which rewrites
+            // line endings in the index and breaks our diff assertions.
+            &["config", "core.autocrlf", "false"],
         ] {
             assert!(Command::new("git")
                 .arg("-C")

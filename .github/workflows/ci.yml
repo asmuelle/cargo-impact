@@ -65,8 +65,10 @@ jobs:
         toolchain: [stable, beta]
         include:
           # Pin MSRV here. Update deliberately — do not let dependencies bump it.
+          # Bumped 1.82 → 1.85 because `clap_lex` 1.1.0 requires `edition2024`,
+          # stabilized in Rust 1.85. Unpinning to follow clap's own MSRV.
           - os: ubuntu-latest
-            toolchain: "1.82"
+            toolchain: "1.85"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6

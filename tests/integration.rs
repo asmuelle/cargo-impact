@@ -43,8 +43,15 @@ fn seed_repo(initial: &[(&str, &str)], modifications: &[(&str, &str)]) -> TempDi
     git(root, &["config", "user.email", "t@t"]);
     git(root, &["config", "user.name", "t"]);
     git(root, &["config", "commit.gpgsign", "false"]);
-    // Future-proof against branch-name surprises on fresh git installs.
-    git(root, &["checkout", "-q", "-b", "main"]);
+    // Windows defaults `core.autocrlf = true`, which mutates the index
+    // version of committed files and can make our diff-vs-WT comparison
+    // observe phantom differences (or miss real ones) on that platform.
+    // Hold line endings verbatim across init/add/commit.
+    git(root, &["config", "core.autocrlf", "false"]);
+    // `-B` (create-or-reset) instead of `-b`: handles the case where
+    // `git init`'s default branch is already `main` (git 2.28+ with
+    // `init.defaultBranch = main`, common on CI runners).
+    git(root, &["checkout", "-q", "-B", "main"]);
 
     for (rel, body) in initial {
         let path = root.join(rel);
