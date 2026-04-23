@@ -44,6 +44,7 @@ mod ffi;
 pub mod finding;
 pub mod format;
 mod git;
+mod ignore;
 pub mod mcp;
 mod nextest;
 mod rust_analyzer;
@@ -56,6 +57,22 @@ mod traits;
 pub use finding::{Finding, FindingKind, Location, SeverityClass, Tier, TierSummary};
 pub use format::{render as render_report, render_with_budget, Format};
 pub use nextest::filter_expression as nextest_filter;
+
+/// Deduped list of files implicated by the blast radius. Combines the
+/// raw `changed_files` from git with each finding's `primary_path`.
+/// Used by the `--context` short-circuit and exposed publicly so
+/// downstream tooling can compute the same set without re-running the
+/// analyzers.
+pub fn context_file_list(report: &AnalysisReport) -> Vec<std::path::PathBuf> {
+    let mut set: std::collections::BTreeSet<std::path::PathBuf> =
+        report.changed_files.iter().cloned().collect();
+    for f in &report.findings {
+        if let Some(p) = f.primary_path() {
+            set.insert(p.to_path_buf());
+        }
+    }
+    set.into_iter().collect()
+}
 
 /// Command-line arguments for `cargo impact`.
 #[derive(Parser, Debug)]
@@ -123,6 +140,17 @@ pub struct ImpactArgs {
     /// a footer noting how many findings were dropped.
     #[arg(long, default_value_t = 0)]
     pub budget: usize,
+
+    /// Emit a newline-delimited list of files implicated by the blast
+    /// radius (one repo-relative path per line) instead of the normal
+    /// report. Suitable for piping to
+    /// [`cargo-context`](https://github.com/asmuelle/cargo-context)
+    /// once it gains a `--files-from -` flag (tracked at
+    /// `asmuelle/cargo-context#5`), or to `xargs cat` / `grep -l` /
+    /// any tool that consumes a file list. Unique paths only.
+    /// Overrides `--format` and `--test`.
+    #[arg(long)]
+    pub context: bool,
 
     /// Activate these Cargo features for cfg evaluation. Accepts a
     /// comma-separated list and/or repeated flags. Takes precedence over
@@ -295,6 +323,18 @@ fn analyze_inner(args: &ImpactArgs, root: &std::path::Path) -> Result<AnalysisRe
         Err(e) => eprintln!("cargo-impact: rust-analyzer failed: {e:#}"),
     }
 
+    // Apply .impactignore filtering before confidence threshold and ID
+    // assignment — ignored findings shouldn't consume ID slots or affect
+    // the summary counts. Findings with no primary path (SemverCheck) are
+    // never ignored; the ignore file is about file-scoped noise.
+    let ignore_set = ignore::IgnoreSet::load(root);
+    if !ignore_set.is_empty() {
+        findings.retain(|f| match f.primary_path() {
+            Some(p) => !ignore_set.is_ignored(p),
+            None => true,
+        });
+    }
+
     findings.retain(|f| f.confidence >= args.confidence_min);
 
     // Assign content-hashed IDs *before* sorting so the same finding
@@ -341,6 +381,13 @@ pub fn run(args: &ImpactArgs) -> Result<i32> {
         } else {
             let out = render_with_budget(args.format, &[], &[], &[], args.budget)?;
             println!("{out}");
+        }
+        return Ok(0);
+    }
+
+    if args.context {
+        for path in context_file_list(&report) {
+            println!("{}", path.display());
         }
         return Ok(0);
     }

@@ -281,6 +281,9 @@ impl AnalyzeArgs {
             all_features: self.all_features.unwrap_or(false),
             no_default_features: self.no_default_features.unwrap_or(false),
             budget: self.budget.unwrap_or(0),
+            // MCP callers always want the structured report, never the
+            // bare file-list. --context is a CLI-only output mode.
+            context: false,
         }
     }
 }

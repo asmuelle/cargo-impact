@@ -9,7 +9,7 @@
 use serde::Serialize;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Confidence tier per README §3F.
 ///
@@ -268,6 +268,26 @@ impl FindingKind {
         }
     }
 
+    /// The primary file path this finding is about, for ignore-filtering
+    /// and UI "go to file" affordances. Returns `None` for global findings
+    /// that don't name a specific path (e.g. `SemverCheck`, which reports
+    /// on the whole public API surface).
+    pub fn primary_path(&self) -> Option<&Path> {
+        match self {
+            Self::TestReference { test, .. } => Some(test.file.as_path()),
+            Self::TraitImpl { impl_site, .. } => Some(impl_site.file.as_path()),
+            Self::DerivedTraitImpl { derive_site, .. } => Some(derive_site.file.as_path()),
+            Self::DynDispatch { site, .. } => Some(site.file.as_path()),
+            Self::DocDriftLink { doc, .. } => Some(doc.file.as_path()),
+            Self::DocDriftKeyword { doc, .. } => Some(doc.file.as_path()),
+            Self::FfiSignatureChange { file, .. } => Some(file.as_path()),
+            Self::BuildScriptChanged { file, .. } => Some(file.as_path()),
+            Self::ResolvedReference { target, .. } => Some(target.file.as_path()),
+            Self::TraitDefinitionChange { file, .. } => Some(file.as_path()),
+            Self::SemverCheck { .. } => None,
+        }
+    }
+
     /// Tag used for sorting/grouping and the JSON `kind` field's value.
     pub fn tag(&self) -> &'static str {
         match self {
@@ -356,6 +376,13 @@ impl Finding {
     pub fn with_suggested_action(mut self, action: impl Into<String>) -> Self {
         self.suggested_action = Some(action.into());
         self
+    }
+
+    /// Delegates to [`FindingKind::primary_path`]. Convenience shortcut
+    /// so callers don't have to reach through `.kind` for a near-ubiquitous
+    /// operation.
+    pub fn primary_path(&self) -> Option<&Path> {
+        self.kind.primary_path()
     }
 }
 
