@@ -58,7 +58,7 @@ mod trait_methods;
 mod traits;
 
 pub use finding::{Finding, FindingKind, Location, SeverityClass, Tier, TierSummary};
-pub use format::{render as render_report, render_with_budget, Format};
+pub use format::{Format, render as render_report, render_with_budget};
 pub use nextest::filter_expression as nextest_filter;
 
 /// Deduped list of files implicated by the blast radius. Combines the

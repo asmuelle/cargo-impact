@@ -1,5 +1,5 @@
 use anyhow::Result;
-use cargo_impact::{log_miss, mcp, run, ImpactArgs};
+use cargo_impact::{ImpactArgs, log_miss, mcp, run};
 use clap::Parser;
 
 fn main() -> Result<()> {

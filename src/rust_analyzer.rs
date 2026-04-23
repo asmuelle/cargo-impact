@@ -44,8 +44,8 @@
 //!   `impl` block, or plain caller, and tag severity accordingly.
 
 use crate::finding::{Finding, FindingKind, Location, Tier};
-use anyhow::{anyhow, bail, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, anyhow, bail};
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};

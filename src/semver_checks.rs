@@ -77,8 +77,11 @@ pub fn parse_output(success: bool, combined: &str) -> Vec<Finding> {
         level: "breaking".to_string(),
         details,
     };
-    vec![Finding::new("", Tier::Likely, 0.95, kind, evidence)
-        .with_suggested_action("cargo semver-checks check-release  # for full detail".to_string())]
+    vec![
+        Finding::new("", Tier::Likely, 0.95, kind, evidence).with_suggested_action(
+            "cargo semver-checks check-release  # for full detail".to_string(),
+        ),
+    ]
 }
 
 /// Check whether `cargo-semver-checks` is installed. Uses the bin name cargo
@@ -217,10 +220,12 @@ Other status noise
     fn suggested_action_points_users_at_raw_tool() {
         let findings = parse_output(false, "FAIL anything");
         assert_eq!(findings.len(), 1);
-        assert!(findings[0]
-            .suggested_action
-            .as_deref()
-            .is_some_and(|s| s.contains("cargo semver-checks")));
+        assert!(
+            findings[0]
+                .suggested_action
+                .as_deref()
+                .is_some_and(|s| s.contains("cargo semver-checks"))
+        );
     }
 
     #[test]

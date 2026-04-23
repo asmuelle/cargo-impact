@@ -169,10 +169,12 @@ mod tests {
             }
             other => panic!("expected TestReference, got {other:?}"),
         }
-        assert!(hits[0]
-            .suggested_action
-            .as_deref()
-            .is_some_and(|s| s.contains("test(smoke)")));
+        assert!(
+            hits[0]
+                .suggested_action
+                .as_deref()
+                .is_some_and(|s| s.contains("test(smoke)"))
+        );
     }
 
     #[test]

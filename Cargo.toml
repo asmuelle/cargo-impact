@@ -1,7 +1,7 @@
 [package]
 name = "cargo-impact"
 version = "0.3.0-alpha.1"
-edition = "2021"
+edition = "2024"
 rust-version = "1.85"
 description = "Blast-radius analysis and selective test execution for Rust workspaces"
 license = "MIT OR Apache-2.0"

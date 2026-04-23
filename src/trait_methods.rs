@@ -269,30 +269,36 @@ mod tests {
             // line endings in the index and breaks our diff assertions.
             &["config", "core.autocrlf", "false"],
         ] {
-            assert!(Command::new("git")
-                .arg("-C")
-                .arg(root)
-                .args(args)
-                .status()
-                .unwrap()
-                .success());
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(root)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
         }
         let rel = std::path::PathBuf::from("src.rs");
         fs::write(root.join(&rel), initial).unwrap();
-        assert!(Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(["add", "src.rs"])
-            .status()
-            .unwrap()
-            .success());
-        assert!(Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(["commit", "-q", "-m", "init"])
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["add", "src.rs"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["commit", "-q", "-m", "init"])
+                .status()
+                .unwrap()
+                .success()
+        );
         fs::write(root.join(&rel), modified).unwrap();
         (dir, rel)
     }
@@ -369,9 +375,10 @@ mod tests {
             "pub trait Greeter: Send { fn hi(&self); }\n",
         );
         let recs = classify_changes_in_file(dir.path(), &rel, "HEAD").unwrap();
-        assert!(recs
-            .iter()
-            .any(|r| r.change == TraitChange::SupertraitOrBoundChanged));
+        assert!(
+            recs.iter()
+                .any(|r| r.change == TraitChange::SupertraitOrBoundChanged)
+        );
     }
 
     #[test]

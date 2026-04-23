@@ -42,10 +42,10 @@
 //! * `impact_version` — smoke-test tool that returns the crate version.
 //!   Agents call this first to verify the server is alive.
 
-use crate::{analyze, render_with_budget, AnalysisReport, Format, ImpactArgs};
+use crate::{AnalysisReport, Format, ImpactArgs, analyze, render_with_budget};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
