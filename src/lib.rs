@@ -36,6 +36,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 mod cfg;
+mod config;
 mod derive;
 mod diff;
 mod doc_drift;
@@ -75,7 +76,7 @@ pub fn context_file_list(report: &AnalysisReport) -> Vec<std::path::PathBuf> {
 }
 
 /// Command-line arguments for `cargo impact`.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(
     name = "cargo-impact",
     bin_name = "cargo-impact",
@@ -219,6 +220,14 @@ pub fn analyze(args: &ImpactArgs) -> Result<AnalysisReport> {
         Some(p) => p.clone(),
         None => std::env::current_dir().context("reading current directory")?,
     };
+
+    // Merge cargo-impact.toml defaults into the args struct before
+    // anything else consults those fields. apply_config only overrides
+    // values that look clap-default, so explicit CLI flags always win.
+    let cfg_file = config::ConfigFile::load(&root);
+    let mut args = args.clone();
+    config::apply_config(&cfg_file.defaults, &mut args);
+    let args = &args;
 
     // Resolve features once, install as thread-local for the whole analyzer
     // block. `cfg::parse_and_filter` — used by every analyzer in place of
