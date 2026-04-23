@@ -52,6 +52,33 @@ cargo install --git https://github.com/asmuelle/cargo-impact --tag v0.3.0
 #    macos-aarch64, and windows-x86_64 are attached to each release.
 ```
 
+### In CI — [`cargo-impact-action`](https://github.com/asmuelle/cargo-impact-action)
+
+Drop `cargo-impact` into a GitHub repo with ≤10 lines of YAML. The
+action installs cargo-impact, runs against the PR diff, uploads a
+SARIF report (code scanning renders findings inline on the diff),
+and posts a sticky markdown PR comment.
+
+```yaml
+on: [pull_request]
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+jobs:
+  impact:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: asmuelle/cargo-impact-action@v1
+        with:
+          fail-on: high      # omit to stay informational-only
+```
+
+See the [action's README](https://github.com/asmuelle/cargo-impact-action)
+for all inputs/outputs and troubleshooting.
+
 ### First run
 
 ```bash
