@@ -35,6 +35,7 @@ use clap::Parser;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+mod adapters;
 mod cfg;
 mod config;
 mod derive;
@@ -288,6 +289,7 @@ fn analyze_inner(args: &ImpactArgs, root: &std::path::Path) -> Result<AnalysisRe
         &changed_trait_names,
     )?);
     findings.extend(doc_drift::find_doc_drift(root, &symbol_names)?);
+    findings.extend(adapters::find_runtime_surfaces(root, &symbol_names)?);
 
     for rel in &changed_files {
         match ffi::find_ffi_changes(root, rel, &args.since) {

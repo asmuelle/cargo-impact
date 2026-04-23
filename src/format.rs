@@ -366,6 +366,14 @@ fn finding_summary(f: &Finding) -> String {
             target.symbol,
             target.file.display()
         ),
+        FindingKind::RuntimeSurface {
+            framework,
+            identifier,
+            site,
+        } => format!(
+            "{framework} runtime surface `{identifier}` ({})",
+            site.file.display()
+        ),
         FindingKind::TraitDefinitionChange {
             trait_name,
             method,

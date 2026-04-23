@@ -148,6 +148,17 @@ pub enum FindingKind {
         source_symbol: String,
         target: Location,
     },
+    /// A runtime-surface handler (HTTP route, CLI subcommand, etc.)
+    /// implicated by a changed symbol. Emitted by framework-specific
+    /// adapters (axum, clap — see `src/adapters.rs`). `framework`
+    /// names the adapter that produced it; `identifier` is the
+    /// framework-specific surface identity (route path, subcommand
+    /// name); `site` points at the Rust source defining the handler.
+    RuntimeSurface {
+        framework: String,
+        identifier: String,
+        site: Location,
+    },
     /// A specific, per-method change inside a trait definition. Complements
     /// `TraitImpl` (which flags every impl of a changed trait at blanket
     /// precision) by explaining *what* about the trait changed — required
@@ -254,7 +265,8 @@ impl FindingKind {
             Self::TraitImpl { .. }
             | Self::DerivedTraitImpl { .. }
             | Self::FfiSignatureChange { .. }
-            | Self::BuildScriptChanged { .. } => SeverityClass::High,
+            | Self::BuildScriptChanged { .. }
+            | Self::RuntimeSurface { .. } => SeverityClass::High,
             Self::TestReference { .. }
             | Self::DynDispatch { .. }
             | Self::ResolvedReference { .. } => SeverityClass::Medium,
@@ -284,6 +296,7 @@ impl FindingKind {
             Self::BuildScriptChanged { file, .. } => Some(file.as_path()),
             Self::ResolvedReference { target, .. } => Some(target.file.as_path()),
             Self::TraitDefinitionChange { file, .. } => Some(file.as_path()),
+            Self::RuntimeSurface { site, .. } => Some(site.file.as_path()),
             Self::SemverCheck { .. } => None,
         }
     }
@@ -302,6 +315,7 @@ impl FindingKind {
             Self::SemverCheck { .. } => "semver_check",
             Self::TraitDefinitionChange { .. } => "trait_definition_change",
             Self::ResolvedReference { .. } => "resolved_reference",
+            Self::RuntimeSurface { .. } => "runtime_surface",
         }
     }
 }
