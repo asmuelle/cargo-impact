@@ -46,6 +46,7 @@ pub mod finding;
 pub mod format;
 mod git;
 mod ignore;
+pub mod log_miss;
 pub mod mcp;
 mod nextest;
 mod rust_analyzer;
