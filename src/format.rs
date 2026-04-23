@@ -12,12 +12,22 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
-#[value(rename_all = "lowercase")]
+#[value(rename_all = "kebab-case")]
 pub enum Format {
     #[default]
     Text,
     Markdown,
     Json,
+    /// SARIF v2.1.0 — the format GitHub code scanning, GitLab, Sonar,
+    /// and every major scanner UI consumes. Emit this from CI and
+    /// upload via `github/codeql-action/upload-sarif` (or equivalent)
+    /// to get inline-on-PR-diff annotations for free.
+    Sarif,
+    /// Markdown optimized for GitHub PR comments — collapsed
+    /// `<details>` per severity, compact tables instead of bullets,
+    /// no verification checklist. Pair with an action that posts
+    /// the output as a sticky PR comment.
+    PrComment,
 }
 
 /// Top-level JSON envelope. Stable across releases; additions go at the end.
@@ -82,6 +92,13 @@ pub fn render_with_budget(
             budget,
         )),
         Format::Json => render_json(changed_files, candidate_symbols, findings),
+        Format::Sarif => render_sarif(findings),
+        Format::PrComment => Ok(render_pr_comment(
+            changed_files,
+            candidate_symbols,
+            findings,
+            budget,
+        )),
     }
 }
 
@@ -299,6 +316,295 @@ fn render_json(
         summary: ReportSummary::build(findings),
     };
     Ok(serde_json::to_string_pretty(&report)?)
+}
+
+// ---------------------------------------------------------------------------
+// SARIF v2.1.0 — inherits every major scanner UI's "annotations inline on
+// PR diff" rendering via `github/codeql-action/upload-sarif` and friends.
+// Spec: https://docs.oasis-open.org/sarif/sarif/v2.1.0/
+//
+// Design notes
+// ------------
+// * `tool.driver.rules[]` enumerates every `FindingKind` tag so scanners
+//   can hyperlink each result back to a rule description.
+// * `level` maps from severity: High→error, Medium→warning, Low→note,
+//   Unknown→none. Tier/confidence/severity also live in `properties` so
+//   consumers that care about our richer tiering can still access it.
+// * `partialFingerprints.primaryLocationLineHash` reuses our content-
+//   hashed finding id. Scanners dedupe using fingerprints, so the
+//   same finding across runs collapses into one tracked issue.
+// * Paths forward-slash-normalized to keep Windows + Unix results
+//   comparable under the same SARIF upload.
+
+fn render_sarif(findings: &[Finding]) -> anyhow::Result<String> {
+    let rules = FindingKind::all_tags()
+        .iter()
+        .map(|tag| sarif_rule(tag))
+        .collect::<Vec<_>>();
+
+    let results = findings.iter().map(sarif_result).collect::<Vec<_>>();
+
+    let doc = serde_json::json!({
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "cargo-impact",
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "informationUri": "https://github.com/asmuelle/cargo-impact",
+                        "rules": rules,
+                    }
+                },
+                "results": results,
+            }
+        ]
+    });
+    Ok(serde_json::to_string_pretty(&doc)?)
+}
+
+fn sarif_rule(tag: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": tag,
+        "name": sarif_rule_name(tag),
+        "shortDescription": { "text": sarif_rule_short(tag) },
+        "helpUri": "https://github.com/asmuelle/cargo-impact#README",
+    })
+}
+
+fn sarif_rule_name(tag: &str) -> String {
+    // `camelCase` name per SARIF convention; scanner UIs sometimes
+    // display `name` instead of `id`.
+    tag.split('_')
+        .enumerate()
+        .map(|(i, part)| {
+            if i == 0 {
+                part.to_string()
+            } else {
+                let mut chars = part.chars();
+                match chars.next() {
+                    Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
+                    None => String::new(),
+                }
+            }
+        })
+        .collect()
+}
+
+fn sarif_rule_short(tag: &str) -> &'static str {
+    match tag {
+        "test_reference" => "Test function references a changed symbol",
+        "trait_impl" => "impl of a changed trait",
+        "derived_trait_impl" => "#[derive(…)] of a changed trait",
+        "dyn_dispatch" => "dyn Trait use of a changed trait",
+        "doc_drift_link" => "Intra-doc link to a changed symbol",
+        "doc_drift_keyword" => "Bare mention of a changed symbol in prose",
+        "ffi_signature_change" => "FFI signature added/removed/modified",
+        "build_script_changed" => "build.rs modified",
+        "semver_check" => "cargo-semver-checks reports public API change",
+        "trait_definition_change" => "Method added/removed/changed on a trait",
+        "resolved_reference" => "rust-analyzer-resolved reference to a changed symbol",
+        "runtime_surface" => "Framework runtime surface (axum route, clap command) affected",
+        _ => "cargo-impact finding",
+    }
+}
+
+fn sarif_result(f: &Finding) -> serde_json::Value {
+    let mut location = serde_json::json!({});
+    if let Some(path) = f.primary_path() {
+        let uri = path.to_string_lossy().replace('\\', "/");
+        let mut physical = serde_json::json!({
+            "artifactLocation": { "uri": uri },
+        });
+        if let Some(line) = finding_line(f) {
+            physical["region"] = serde_json::json!({ "startLine": line });
+        }
+        location = serde_json::json!({ "physicalLocation": physical });
+    }
+
+    let mut locations = Vec::new();
+    if !location.as_object().is_none_or(serde_json::Map::is_empty) {
+        locations.push(location);
+    }
+
+    serde_json::json!({
+        "ruleId": f.kind.tag(),
+        "level": sarif_level(f.severity),
+        "message": { "text": f.evidence },
+        "locations": locations,
+        "partialFingerprints": {
+            "primaryLocationLineHash": f.id
+        },
+        "properties": {
+            "tier": format!("{:?}", f.tier).to_lowercase(),
+            "confidence": f.confidence,
+            "severity": f.severity.as_label().to_lowercase(),
+            "suggestedAction": f.suggested_action,
+        }
+    })
+}
+
+fn sarif_level(severity: SeverityClass) -> &'static str {
+    // SARIF levels: error | warning | note | none.
+    match severity {
+        SeverityClass::High => "error",
+        SeverityClass::Medium => "warning",
+        SeverityClass::Low => "note",
+        SeverityClass::Unknown => "none",
+    }
+}
+
+/// Extract a line number when the finding carries one. Only doc-drift
+/// findings have a line; everything else leaves `region` unset and
+/// SARIF consumers fall back to file-level annotation.
+fn finding_line(f: &Finding) -> Option<u32> {
+    match &f.kind {
+        FindingKind::DocDriftLink { line, .. } | FindingKind::DocDriftKeyword { line, .. } => {
+            Some(*line)
+        }
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PR-comment markdown — tuned for posting as a sticky comment on a GitHub
+// PR. Drops the verification checklist (reviewers don't tick boxes from
+// the diff view), uses collapsed `<details>` per severity so a scrollable
+// body degrades gracefully, tables instead of bullets for density.
+
+fn render_pr_comment(
+    changed_files: &[PathBuf],
+    candidate_symbols: &[String],
+    findings: &[Finding],
+    budget: usize,
+) -> String {
+    let summary = ReportSummary::build(findings);
+    let unlimited = budget == 0;
+    let mut out = String::new();
+
+    // One-line header with severity-badge counts, always emits so the
+    // comment is never empty even under the tightest budget.
+    out.push_str(&format!(
+        "### 🎯 cargo-impact — {total} findings across {nfiles} file{s}\n\
+         `🔴 {h} · 🟡 {m} · 🔵 {l} · ⚪ {u}`\n\n",
+        total = summary.total,
+        nfiles = changed_files.len(),
+        s = if changed_files.len() == 1 { "" } else { "s" },
+        h = summary.by_severity.get("high").unwrap_or(&0),
+        m = summary.by_severity.get("medium").unwrap_or(&0),
+        l = summary.by_severity.get("low").unwrap_or(&0),
+        u = summary.by_severity.get("unknown").unwrap_or(&0),
+    ));
+
+    if findings.is_empty() {
+        out.push_str("_No findings — nothing to verify._\n");
+        return out;
+    }
+
+    // Expand the HIGH section by default so the important stuff is
+    // immediately visible; collapse the rest. Reviewers who care about
+    // MEDIUM/LOW/UNKNOWN can click in.
+    let grouped = group_by_severity(findings);
+    let mut omitted = 0usize;
+    for (severity, expand_default) in [
+        (SeverityClass::High, true),
+        (SeverityClass::Medium, false),
+        (SeverityClass::Low, false),
+        (SeverityClass::Unknown, false),
+    ] {
+        let group = grouped.get(&severity).map_or(&[][..], |v| v.as_slice());
+        if group.is_empty() {
+            continue;
+        }
+        let open = if expand_default { " open" } else { "" };
+        let block_header = format!(
+            "<details{open}><summary>{icon} {label} ({n})</summary>\n\n\
+             | Kind | Location | Evidence |\n\
+             |---|---|---|\n",
+            icon = severity.icon(),
+            label = severity.as_label(),
+            n = group.len(),
+        );
+        let mut rows = String::new();
+        for f in group {
+            let row = format!(
+                "| `{kind}` | {loc} | {evidence} |\n",
+                kind = f.kind.tag(),
+                loc = pr_comment_location(f),
+                evidence = escape_pipe(&f.evidence),
+            );
+            if !unlimited && out.len() + block_header.len() + rows.len() + row.len() > budget {
+                omitted += 1;
+                continue;
+            }
+            rows.push_str(&row);
+        }
+        if !rows.is_empty() {
+            out.push_str(&block_header);
+            out.push_str(&rows);
+            out.push_str("\n</details>\n\n");
+        }
+    }
+
+    // Context + candidate symbols collapsed into one block — useful
+    // context, but not what the reviewer needs to see first.
+    out.push_str(&format!(
+        "<details><summary>📁 {n} changed file{s} · {k} candidate symbol{ks}</summary>\n\n",
+        n = changed_files.len(),
+        s = if changed_files.len() == 1 { "" } else { "s" },
+        k = candidate_symbols.len(),
+        ks = if candidate_symbols.len() == 1 {
+            ""
+        } else {
+            "s"
+        },
+    ));
+    out.push_str("**Changed files:**\n\n");
+    for f in changed_files {
+        out.push_str(&format!("- `{}`\n", f.display()));
+    }
+    if !candidate_symbols.is_empty() {
+        out.push_str("\n**Candidate symbols:** ");
+        out.push_str(
+            &candidate_symbols
+                .iter()
+                .map(|s| format!("`{s}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        out.push('\n');
+    }
+    out.push_str("\n</details>\n");
+
+    if !unlimited && omitted > 0 {
+        out.push_str(&format!(
+            "\n> ⚠ {omitted} findings omitted to fit the `--budget={budget}` cap.\n"
+        ));
+    }
+
+    out.push_str(&format!(
+        "\n<sub>Generated by [cargo-impact v{}](https://github.com/asmuelle/cargo-impact) · [full report](#) · [raw JSON](#)</sub>\n",
+        env!("CARGO_PKG_VERSION")
+    ));
+
+    out
+}
+
+fn pr_comment_location(f: &Finding) -> String {
+    match f.primary_path() {
+        Some(p) => match finding_line(f) {
+            Some(line) => format!("`{}:{line}`", p.display()),
+            None => format!("`{}`", p.display()),
+        },
+        None => "—".to_string(),
+    }
+}
+
+fn escape_pipe(s: &str) -> String {
+    // Markdown tables use `|` as the column separator; evidence text
+    // may contain pipes that we need to escape.
+    s.replace('|', "\\|").replace('\n', " ")
 }
 
 fn group_by_severity(findings: &[Finding]) -> BTreeMap<SeverityClass, Vec<&Finding>> {
@@ -558,5 +864,199 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["summary"]["total"], 0);
         assert_eq!(v["findings"].as_array().unwrap().len(), 0);
+    }
+
+    // --- SARIF ---
+
+    #[test]
+    fn sarif_emits_stable_envelope_and_schema() {
+        let findings = vec![sample_finding("f-0001")];
+        let out = render_sarif(&findings).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+        assert_eq!(v["version"], "2.1.0");
+        assert_eq!(
+            v["$schema"],
+            "https://json.schemastore.org/sarif-2.1.0.json"
+        );
+        let driver = &v["runs"][0]["tool"]["driver"];
+        assert_eq!(driver["name"], "cargo-impact");
+        assert!(driver["rules"].as_array().unwrap().len() >= 12);
+
+        let result = &v["runs"][0]["results"][0];
+        assert_eq!(result["ruleId"], "test_reference");
+        assert_eq!(result["message"]["text"], "direct ref");
+        assert_eq!(
+            result["partialFingerprints"]["primaryLocationLineHash"],
+            "f-0001"
+        );
+    }
+
+    #[test]
+    fn sarif_maps_severity_to_sarif_level() {
+        assert_eq!(sarif_level(SeverityClass::High), "error");
+        assert_eq!(sarif_level(SeverityClass::Medium), "warning");
+        assert_eq!(sarif_level(SeverityClass::Low), "note");
+        assert_eq!(sarif_level(SeverityClass::Unknown), "none");
+    }
+
+    #[test]
+    fn sarif_rule_names_use_camel_case() {
+        assert_eq!(sarif_rule_name("test_reference"), "testReference");
+        assert_eq!(
+            sarif_rule_name("ffi_signature_change"),
+            "ffiSignatureChange"
+        );
+        assert_eq!(sarif_rule_name("trait_impl"), "traitImpl");
+    }
+
+    #[test]
+    fn sarif_rules_cover_every_finding_kind() {
+        // The SARIF rules list must enumerate all FindingKind tags so
+        // scanners can hyperlink every result back to a rule.
+        let rules_tags: std::collections::BTreeSet<String> = FindingKind::all_tags()
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(rules_tags.len(), 12);
+        for tag in FindingKind::all_tags() {
+            assert!(
+                !sarif_rule_short(tag).is_empty(),
+                "missing rule description for {tag}"
+            );
+        }
+    }
+
+    #[test]
+    fn sarif_includes_region_only_when_line_available() {
+        // DocDriftLink carries a line number — region should be present.
+        let drift = FindingKind::DocDriftLink {
+            symbol: "Foo".into(),
+            doc: crate::finding::Location {
+                file: PathBuf::from("docs/arch.md"),
+                symbol: "Foo".into(),
+            },
+            line: 42,
+        };
+        let f = Finding::new("f-x", Tier::Likely, 0.9, drift, "intra-doc link");
+        let out = render_sarif(&[f]).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]["startLine"],
+            42
+        );
+
+        // TestReference has no line — region should be absent.
+        let test_ref = sample_finding("f-y");
+        let out2 = render_sarif(&[test_ref]).unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&out2).unwrap();
+        assert!(
+            v2["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"].is_null(),
+            "region should be absent when no line is known"
+        );
+    }
+
+    #[test]
+    fn sarif_handles_empty_findings() {
+        let out = render_sarif(&[]).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["runs"][0]["results"].as_array().unwrap().len(), 0);
+        // Rules list is still populated — schema-defined even when no results.
+        assert!(
+            v["runs"][0]["tool"]["driver"]["rules"]
+                .as_array()
+                .unwrap()
+                .len()
+                >= 12
+        );
+    }
+
+    // --- PR comment ---
+
+    #[test]
+    fn pr_comment_shape_is_stable() {
+        let findings = vec![sample_finding("f-0001")];
+        let out = render_pr_comment(
+            &[PathBuf::from("src/lib.rs")],
+            &["login".into()],
+            &findings,
+            0,
+        );
+        // Header line with severity badges.
+        assert!(out.starts_with("### 🎯 cargo-impact — "));
+        // One <details> block per severity that has findings.
+        assert!(
+            out.contains("<details open><summary>🔴 HIGH")
+                || out.contains("<details><summary>🟡 MEDIUM")
+        );
+        // Context block at the end.
+        assert!(out.contains("📁 1 changed file · 1 candidate symbol"));
+        // Tool attribution sub-footer.
+        assert!(out.contains("cargo-impact v"));
+    }
+
+    #[test]
+    fn pr_comment_expands_high_by_default_collapses_others() {
+        let mk = |id: &str, sev: SeverityClass| {
+            let mut f = sample_finding(id);
+            f.severity = sev;
+            f
+        };
+        let findings = vec![
+            mk("high-1", SeverityClass::High),
+            mk("med-1", SeverityClass::Medium),
+            mk("low-1", SeverityClass::Low),
+        ];
+        let out = render_pr_comment(
+            &[PathBuf::from("src/lib.rs")],
+            &["login".into()],
+            &findings,
+            0,
+        );
+        assert!(out.contains("<details open><summary>🔴 HIGH (1)"));
+        assert!(out.contains("<details><summary>🟡 MEDIUM (1)"));
+        assert!(out.contains("<details><summary>🔵 LOW (1)"));
+    }
+
+    #[test]
+    fn pr_comment_empty_findings_still_emits_header() {
+        let out = render_pr_comment(&[PathBuf::from("src/lib.rs")], &[], &[], 0);
+        assert!(out.contains("0 findings"));
+        assert!(out.contains("_No findings — nothing to verify._"));
+    }
+
+    #[test]
+    fn pr_comment_escapes_pipes_in_evidence() {
+        let kind = FindingKind::TestReference {
+            test: crate::finding::Location {
+                file: PathBuf::from("tests/t.rs"),
+                symbol: "t".into(),
+            },
+            matched_symbols: vec!["f".into()],
+        };
+        let f = Finding::new(
+            "f-pipe",
+            Tier::Likely,
+            0.8,
+            kind,
+            "evidence with | pipe char",
+        );
+        let out = render_pr_comment(&[], &[], &[f], 0);
+        assert!(out.contains("with \\| pipe"));
+    }
+
+    #[test]
+    fn pr_comment_budget_truncates_with_notice() {
+        let findings: Vec<Finding> = (0..30)
+            .map(|i| sample_finding(&format!("f-{i:02}")))
+            .collect();
+        let out = render_pr_comment(
+            &[PathBuf::from("src/lib.rs")],
+            &["login".into()],
+            &findings,
+            1000,
+        );
+        assert!(out.contains("findings omitted"));
+        assert!(out.contains("--budget=1000"));
     }
 }

@@ -301,6 +301,26 @@ impl FindingKind {
         }
     }
 
+    /// Every possible value [`tag`] can return — useful for schema
+    /// generators (SARIF rules list, MCP tool descriptions) that need
+    /// to enumerate kinds without having a runtime instance.
+    pub fn all_tags() -> &'static [&'static str] {
+        &[
+            "test_reference",
+            "trait_impl",
+            "derived_trait_impl",
+            "dyn_dispatch",
+            "doc_drift_link",
+            "doc_drift_keyword",
+            "ffi_signature_change",
+            "build_script_changed",
+            "semver_check",
+            "trait_definition_change",
+            "resolved_reference",
+            "runtime_surface",
+        ]
+    }
+
     /// Tag used for sorting/grouping and the JSON `kind` field's value.
     pub fn tag(&self) -> &'static str {
         match self {
