@@ -349,3 +349,57 @@ fn json_output_schema_is_stable() {
         );
     }
 }
+
+#[test]
+fn output_is_byte_identical_across_two_runs_for_every_format() {
+    // Determinism gate (v0.4 core): two invocations of cargo-impact on
+    // the same fixture must produce byte-identical stdout across every
+    // format. CI jobs that cache by content hash and PR-diff tools that
+    // compare across runs rely on this; if any format leaks a timestamp
+    // or HashMap-ordered field, this test catches it.
+    let dir = seed_repo(
+        &[
+            ("Cargo.toml", manifest()),
+            (
+                "src/lib.rs",
+                "pub trait Greeter { fn hi(&self); }\n\
+                 pub struct F;\n\
+                 impl Greeter for F { fn hi(&self) {} }\n\
+                 #[cfg(test)] mod tests {\n\
+                 use super::*;\n\
+                 #[test] fn smoke() { F.hi(); }\n\
+                 }\n",
+            ),
+        ],
+        &[(
+            "src/lib.rs",
+            "pub trait Greeter { fn hi(&self, n: u32); }\n\
+             pub struct F;\n\
+             impl Greeter for F { fn hi(&self, n: u32) { let _ = n; } }\n\
+             #[cfg(test)] mod tests {\n\
+             use super::*;\n\
+             #[test] fn smoke() { F.hi(1); }\n\
+             }\n",
+        )],
+    );
+
+    // Every user-facing format must be byte-stable. Include --test
+    // (which emits the nextest filter expression) too since that path
+    // is also consumed by downstream scripts.
+    for args in [
+        vec!["--format", "text"],
+        vec!["--format", "markdown"],
+        vec!["--format", "json"],
+        vec!["--format", "sarif"],
+        vec!["--format", "pr-comment"],
+        vec!["--test"],
+    ] {
+        let (first, code_a) = run_impact(dir.path(), &args);
+        let (second, code_b) = run_impact(dir.path(), &args);
+        assert_eq!(code_a, code_b, "exit codes diverged for {args:?}");
+        assert_eq!(
+            first, second,
+            "stdout diverged for {args:?}\n--- first ---\n{first}\n--- second ---\n{second}"
+        );
+    }
+}
