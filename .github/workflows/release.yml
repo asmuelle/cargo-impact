@@ -87,17 +87,34 @@ jobs:
           # Pre-1.0 releases are drafts by default — promote manually after smoke test.
           draft: ${{ startsWith(github.ref_name, 'v0.') }}
 
-  # Publish to crates.io. Requires CRATES_IO_TOKEN repo secret.
-  # Disabled as a manual gate on pre-1.0 releases — flip `if:` once v1.0 ships.
+  # Publish to crates.io. Requires the CRATES_IO_TOKEN repo secret
+  # (generate one at https://crates.io/me and add via
+  # `gh secret set CRATES_IO_TOKEN --repo asmuelle/cargo-impact`).
+  # The job self-skips when the secret is absent so tag pushes don't
+  # fail the whole workflow before you've configured crates.io access.
+  # pre-release versions (0.3.0-alpha.X, etc.) publish fine — crates.io
+  # supports them and just doesn't surface them in default install
+  # resolution.
   crates-io:
     needs: build
-    if: false # TODO: enable once v0.1 is ready and CRATES_IO_TOKEN is configured
     runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
     steps:
+      - name: Check for CRATES_IO_TOKEN
+        id: check
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::CRATES_IO_TOKEN not set — skipping crates.io publish."
+            echo "::notice::Set it with \`gh secret set CRATES_IO_TOKEN\` to enable."
+          fi
       - uses: actions/checkout@v6
+        if: steps.check.outputs.skip != 'true'
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        if: steps.check.outputs.skip != 'true'
         with:
           toolchain: stable
-      - run: cargo publish --locked
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+      - name: cargo publish
+        if: steps.check.outputs.skip != 'true'
+        run: cargo publish --locked

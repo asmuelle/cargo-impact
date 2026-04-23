@@ -33,43 +33,50 @@ It answers the critical question: *"I changed X; what is the minimum set of thin
 
 ---
 
-## 2. Quickstart (Intended UX)
+## 2. Quickstart
 
-> Once shipped, first-run experience will look like this. None of the commands below work yet.
+### Install
+
+Pick whichever path fits your environment:
 
 ```bash
-# Install (once v0.1 ships)
+# 1. crates.io (once published — see https://crates.io/crates/cargo-impact)
 cargo install cargo-impact
 
-# In a Rust workspace with uncommitted changes:
+# 2. Pinned from source by tag (works today, no crates.io dependency)
+cargo install --git https://github.com/asmuelle/cargo-impact --tag v0.3.0-alpha.1
+
+# 3. Prebuilt binary from the GitHub release page
+#    https://github.com/asmuelle/cargo-impact/releases
+#    Binaries for linux-x86_64, linux-aarch64, macos-x86_64,
+#    macos-aarch64, and windows-x86_64 are attached to each release.
+```
+
+### First run
+
+```bash
 cd my-rust-project
 cargo impact
 ```
 
-Expected first-run output:
+Expected first-run output on a clean workspace:
 
 ```text
-cargo-impact v0.1.0 · analyzing diff against HEAD
-building rust-analyzer index (first run, ~15s) ... done
-4 changed symbols · 11 findings
-
-🔴 HIGH (2)   🟡 MEDIUM (4)   🔵 LOW (4)   ⚪ UNKNOWN (1)
-
-Run `cargo impact --test` to execute affected tests only.
-Run `cargo impact --checklist` to generate a verification checklist.
-Run `cargo impact explain f-0007` for details on any finding.
+cargo-impact: no Rust files changed relative to HEAD
 ```
 
-Subsequent runs on the same workspace use the cached index and return in <1 second (see §9).
+Make a change, re-run, and you'll get the severity-grouped report. `cargo impact --help` lists every flag.
 
 ### Typical AI loop
 ```bash
-cargo context --fix | pbcopy           # 1. Give AI the context pack
-# ... AI generates a patch, you apply it ...
-cargo impact --checklist | pbcopy      # 2. Give AI the verification checklist
+cargo impact --context | xargs cat     # 1. Emit blast-radius file contents
+# ... feed output to AI, have it generate a patch, apply it ...
+cargo impact --format markdown         # 2. Get the verification checklist
 # ... AI ticks items, flags what it cannot verify ...
 cargo impact --test                    # 3. Run only the affected tests
 ```
+
+For agent-native consumption, start the MCP server: `cargo impact mcp` speaks JSON-RPC 2.0 over stdio with all six tools from §8.
 
 ---
 
