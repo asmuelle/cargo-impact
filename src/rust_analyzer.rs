@@ -566,14 +566,37 @@ fn uri_to_relative_path(uri: &str, base: &Path) -> PathBuf {
     let Some(stripped) = uri.strip_prefix("file://") else {
         return PathBuf::from(uri);
     };
-    // On Windows the leading `/` before the drive letter isn't part of
-    // the real path.
-    #[cfg(windows)]
-    let stripped = stripped.strip_prefix('/').unwrap_or(stripped);
-    let abs = PathBuf::from(stripped);
+    // Windows drive-letter URIs take the shape `file:///C:/path` — the
+    // leading `/` before the drive letter is URI cruft, not part of the
+    // filesystem path. Unix-style URIs like `file:///tmp/path` keep that
+    // leading `/` because it *is* the root. Detect the drive-letter form
+    // by shape so the logic works identically on both platforms — the
+    // `#[cfg(windows)]` version of this used to unconditionally strip the
+    // slash, which corrupted Unix-shaped URIs when the test happened to
+    // run on a Windows host.
+    let path_str = stripped
+        .strip_prefix('/')
+        .and_then(has_drive_letter)
+        .unwrap_or(stripped);
+    let abs = PathBuf::from(path_str);
     abs.strip_prefix(base)
         .map(std::path::Path::to_path_buf)
         .unwrap_or(abs)
+}
+
+/// Returns `Some(s)` if `s` starts with an ASCII drive letter followed
+/// by `:` (e.g. `C:/foo`), otherwise `None`. Used to distinguish the
+/// Windows `file:///C:/...` URI form from the Unix `file:///tmp/...`
+/// form after stripping the leading scheme slashes.
+fn has_drive_letter(s: &str) -> Option<&str> {
+    let mut chars = s.chars();
+    let first = chars.next()?;
+    let second = chars.next()?;
+    if first.is_ascii_alphabetic() && second == ':' {
+        Some(s)
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -669,9 +692,31 @@ mod tests {
     }
 
     #[test]
-    fn uri_to_relative_path_strips_base() {
+    fn uri_to_relative_path_strips_base_unix_shape() {
         let rel = uri_to_relative_path("file:///tmp/x/src/lib.rs", Path::new("/tmp/x"));
         assert_eq!(rel.to_string_lossy(), "src/lib.rs");
+    }
+
+    #[test]
+    fn uri_to_relative_path_handles_windows_drive_letter_shape() {
+        // Windows URIs tack an extra `/` before the drive letter.
+        // Verify the strip logic recognizes the drive-letter form
+        // regardless of the host we're running on.
+        let rel = uri_to_relative_path(
+            "file:///C:/projects/x/src/lib.rs",
+            Path::new("C:/projects/x"),
+        );
+        assert_eq!(rel.to_string_lossy().replace('\\', "/"), "src/lib.rs");
+    }
+
+    #[test]
+    fn has_drive_letter_classifies_correctly() {
+        assert!(has_drive_letter("C:/projects/x").is_some());
+        assert!(has_drive_letter("z:foo").is_some());
+        assert!(has_drive_letter("tmp/x").is_none());
+        assert!(has_drive_letter("/tmp/x").is_none());
+        assert!(has_drive_letter("").is_none());
+        assert!(has_drive_letter("C").is_none());
     }
 
     #[test]
