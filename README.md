@@ -585,7 +585,7 @@ The minimum set that makes the CI-gate story real. If v0.4 ships with only these
 *   **GitHub Actions composite action** — `uses: asmuelle/cargo-impact-action@v1` with sane defaults (runs on PR, uploads SARIF, comments the markdown report). Target: a first-time user can gate their repo with ≤10 lines of YAML.
 *   **PR-comment output mode** — `--format=pr-comment` renders the markdown optimized for GitHub PR comments (collapsed `<details>` per severity, severity-badge headers, `#<N>` cross-links to the SARIF upload). Complements the SARIF path for teams that don't run code scanning.
 *   **Deterministic output** — strip timestamps, pin sort orders, fix format-version strings, make two runs against the same diff byte-identical. Required for any CI that diffs output across runs or caches by content hash.
-*   **Benchmark suite + SLO regression gates** — `cargo bench`-based timing against a fixture matrix (small / medium / large workspace shapes). CI fails if a run exceeds §9's stated p50 + 20%. Today those numbers are aspirational; v0.4 proves or revises them.
+*   **Benchmark suite + SLO regression gates** — `cargo bench`-based timing against a fixture matrix. Committed baselines in `benches/baseline.json`; CI workflow `.github/workflows/bench.yml` runs `scripts/bench-gate.sh` on every PR and fails if any bench's p50 exceeds baseline × 2.5 (threshold absorbs GH-runner variance, catches genuine 2x+ regressions). Re-baseline with `BENCH_GATE_MODE=update`.
 
 **v0.4 core success metric:** A maintainer of a real open-source Rust project (not us) can add cargo-impact to their CI in under 15 minutes following the README, and a PR that breaks a trait contract surfaces as a blocking annotation on their code-scanning UI.
 
@@ -595,10 +595,10 @@ Higher-value precision improvements that depend on the core being landed first. 
 
 *   **Full macro expansion via `cargo expand` / HIR** — promotes many `Likely` findings to something closer to `Proven` by resolving serde, tokio, axum, clap, thiserror, and similar derive/attribute-macro outputs. The hardest piece of the precision story still outstanding; see §3A for scope.
 *   **Per-reference severity refinement** — rust-analyzer already knows whether a reference sits inside a `#[test] fn`, an `impl` block, or plain caller code. Use `documentSymbol` hierarchy to walk upward from each `ResolvedReference` and upgrade severity accordingly.
-*   **syn/RA finding dedup and tier upgrade** — when a syn analyzer flags a site `Likely` and RA confirms it at `Proven`, emit one finding at the higher tier, not two findings competing for the same slot. Simple merge pass in the orchestrator.
+*   ✅ **syn/RA finding dedup and tier upgrade** — _shipped._ When a syn analyzer flags a site `Likely` and RA confirms it at `Proven`, the syn finding is dropped so the report doesn't double-count. See `src/dedup.rs`.
 *   **`--feature-powerset` (CI mode)** — runs analysis across feature combinations and surfaces findings that the default-feature view missed. Expensive (O(2^N) with feature count); documented as CI-only.
 *   **Streaming progress over MCP** — `$/progress`-style notifications for long analyses so agents see "50 of 200 files analyzed" rather than a 30-second silence.
-*   **More framework adapters** — `actix-web` and `rocket` would be the next-most-requested based on Rust-ecosystem usage. `tauri` / `dioxus` / `leptos` remain on-demand.
+*   ✅ **More framework adapters** — _shipped: `actix-web` + `rocket`._ Method-chain visitors (`.route` / `.service` / `.scope` / `.mount`) plus a shared HTTP-verb attribute-macro pass with framework disambiguation via use-statement scan. `tauri` / `dioxus` / `leptos` remain on-demand.
 
 #### v0.4 explicit non-goals
 

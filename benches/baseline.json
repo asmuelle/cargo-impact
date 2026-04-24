@@ -1,0 +1,31 @@
+{
+  "_comment": [
+    "SLO-regression gate baselines. Each value is the p50 (median)",
+    "in nanoseconds from `cargo bench --bench pipeline` observed on",
+    "ubuntu-latest GitHub Actions runners.",
+    "",
+    "The gate in scripts/bench-gate.sh multiplies these by",
+    "BENCH_GATE_MULT (default 2.5x) before comparing against the",
+    "current run's p50. 2.5x absorbs GitHub runner variance (cold",
+    "caches, noisy neighbors on shared hosts, ±20-30% per-run wobble)",
+    "while still catching real 2x+ regressions.",
+    "",
+    "Baselines are intentionally conservative — each value reflects a",
+    "high-end observation rather than the mean — so normal runs pass",
+    "without manual re-baselining after minor refactors. Update via",
+    "`BENCH_GATE_MODE=update scripts/bench-gate.sh` once CI output",
+    "stabilizes, then commit the regenerated JSON.",
+    "",
+    "Schema: { \"benchmarks\": { \"<bench_id>\": { \"p50_ns\": <num> } } }.",
+    "bench_id matches criterion's \"<group>/<function>\" convention."
+  ],
+  "benchmarks": {
+    "render/Text": { "p50_ns": 100000 },
+    "render/Markdown": { "p50_ns": 200000 },
+    "render/Json": { "p50_ns": 150000 },
+    "render/Sarif": { "p50_ns": 800000 },
+    "render/PrComment": { "p50_ns": 120000 },
+    "analyze_no_changes": { "p50_ns": 200000000 },
+    "analyze_with_changes": { "p50_ns": 500000000 }
+  }
+}

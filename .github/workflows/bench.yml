@@ -1,0 +1,61 @@
+name: bench
+
+# SLO-regression gate. Runs the criterion bench suite and fails if any
+# bench's p50 exceeds `benches/baseline.json` * BENCH_GATE_MULT (2.5x
+# default — see scripts/bench-gate.sh for the why).
+#
+# Triggers:
+# - pull_request: gates on PRs so regressions get caught pre-merge.
+# - workflow_dispatch: manual rerun, useful for re-baselining.
+#
+# Not part of the main `ci` required-check aggregate — bench variance
+# on shared CI hardware is higher than unit tests, so this runs as a
+# separate job with its own cadence. Merge decisions still require the
+# `ci` check green; the bench gate is advisory-but-visible.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "benches/**"
+      - "scripts/bench-gate.sh"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/bench.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  slo-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: bench-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            bench-${{ runner.os }}-
+      - name: Run bench gate
+        run: scripts/bench-gate.sh
+      - name: Upload criterion reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-reports
+          path: target/criterion/
+          retention-days: 14
