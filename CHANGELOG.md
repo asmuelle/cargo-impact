@@ -24,6 +24,12 @@ out explicitly here.
   expansion test-refs whose test name is already covered by a
   raw-source `TestReference`, so no double-counting. Behavior
   unchanged when the flag is off.
+- **Binary-only crate support for `--macro-expand`.** `cargo expand
+  --lib` is tried first (so lib+bin crates get lib-side expansion);
+  on a "no library targets" error the tool now retries without
+  `--lib`, letting cargo's default target selection pick the bin.
+  Previously bin-only crates (CLIs, services) got zero expansion
+  findings.
 
 ### Added
 

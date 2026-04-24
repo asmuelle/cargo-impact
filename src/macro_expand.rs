@@ -204,15 +204,40 @@ fn which(name: &str) -> Option<std::path::PathBuf> {
 }
 
 fn run_cargo_expand(root: &Path) -> Result<String> {
-    // `cargo expand --lib` targets the library crate root. For
-    // binary-only crates this will fail; we keep the current
-    // behavior (stderr note + empty findings) rather than trying a
-    // secondary `--bin` pass — users whose workspace is binary-first
-    // can rely on the RA-backed analysis instead, which doesn't need
-    // cargo-expand.
+    // Strategy: try `--lib` first because lib+bin crates should expand
+    // the library side (traits, types, derive impls typically live
+    // there). If that fails because the crate is binary-only (no
+    // `[lib]` target), retry without `--lib` so cargo's default target
+    // selection picks the bin. Other failure modes (compile errors,
+    // missing dependencies) surface from the second attempt's stderr.
+    match spawn_cargo_expand(root, &["--lib"]) {
+        Ok(out) => Ok(out),
+        Err(e) if is_no_library_error(&e.to_string()) => {
+            eprintln!(
+                "cargo-impact: `cargo expand --lib` found no library target; \
+                 retrying without --lib for binary-only crate."
+            );
+            spawn_cargo_expand(root, &[])
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Detect cargo-expand's "no library targets" error so we can fall
+/// back to binary expansion. Pattern-match on both the cargo-expand
+/// message and the underlying cargo message — phrasing drifts between
+/// versions, so we match on a stable substring.
+fn is_no_library_error(stderr: &str) -> bool {
+    let haystack = stderr.to_lowercase();
+    haystack.contains("no library targets")
+        || haystack.contains("no lib target")
+        || haystack.contains("does not have a library")
+}
+
+fn spawn_cargo_expand(root: &Path, extra_args: &[&str]) -> Result<String> {
     let mut cmd = Command::new("cargo");
     cmd.arg("expand")
-        .arg("--lib")
+        .args(extra_args)
         .arg("--color=never")
         .arg("--ugly") // no rustfmt — faster, syn doesn't care
         .current_dir(root)
@@ -477,6 +502,40 @@ mod tests {
         let src = "#[test] fn t() { let user_profile = 1; let _ = user_profile; }";
         let hits = find_in_expanded(src, &BTreeSet::new(), &changed(&["user"]));
         assert!(hits.is_empty(), "unexpected hits: {hits:?}");
+    }
+
+    // --- Binary-only crate fallback ---
+
+    #[test]
+    fn is_no_library_error_matches_known_phrasings() {
+        // cargo-expand's message (current phrasing).
+        assert!(is_no_library_error(
+            "error: no library targets found in package `foo`"
+        ));
+        // cargo's own variant used in some versions.
+        assert!(is_no_library_error(
+            "error: no lib target found in package `foo`"
+        ));
+        // Another phrasing surfaced in older cargo/cargo-expand combos.
+        assert!(is_no_library_error(
+            "error: the package `foo` does not have a library"
+        ));
+    }
+
+    #[test]
+    fn is_no_library_error_is_case_insensitive() {
+        assert!(is_no_library_error(
+            "ERROR: No Library Targets Found in package `foo`"
+        ));
+    }
+
+    #[test]
+    fn is_no_library_error_rejects_unrelated_errors() {
+        assert!(!is_no_library_error(
+            "error[E0382]: borrow of moved value `x`"
+        ));
+        assert!(!is_no_library_error("error: could not compile `foo`"));
+        assert!(!is_no_library_error(""));
     }
 
     #[test]
