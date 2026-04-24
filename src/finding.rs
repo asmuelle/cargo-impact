@@ -301,7 +301,7 @@ impl FindingKind {
         }
     }
 
-    /// Every possible value [`tag`] can return — useful for schema
+    /// Every possible value [`Self::tag`] can return — useful for schema
     /// generators (SARIF rules list, MCP tool descriptions) that need
     /// to enumerate kinds without having a runtime instance.
     pub fn all_tags() -> &'static [&'static str] {
