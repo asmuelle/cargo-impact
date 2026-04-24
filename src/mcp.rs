@@ -42,10 +42,14 @@
 //! * `impact_version` — smoke-test tool that returns the crate version.
 //!   Agents call this first to verify the server is alive.
 
-use crate::{AnalysisReport, Format, ImpactArgs, analyze, render_with_budget};
+use crate::{
+    AnalysisReport, Format, ImpactArgs, ProgressEvent, analyze, analyze_with_progress,
+    render_with_budget,
+};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::cell::RefCell;
 use std::io::{self, BufRead, Write};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -81,7 +85,7 @@ fn handle_message(msg: &Value, out: &mut impl Write) -> Result<()> {
         "initialize" => write_result(out, id, initialize_result()),
         "initialized" | "notifications/initialized" => Ok(()),
         "tools/list" => write_result(out, id, tools_list_result()),
-        "tools/call" => match call_tool(&params) {
+        "tools/call" => match call_tool(&params, out) {
             Ok(value) => write_result(out, id, value),
             Err(err) => write_error(out, id, -32000, &format!("{err:#}")),
         },
@@ -288,7 +292,7 @@ impl AnalyzeArgs {
     }
 }
 
-fn call_tool(params: &Value) -> Result<Value> {
+fn call_tool(params: &Value, out: &mut impl Write) -> Result<Value> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -300,7 +304,19 @@ fn call_tool(params: &Value) -> Result<Value> {
         "impact_analyze" => {
             let args: AnalyzeArgs = serde_json::from_value(arguments)?;
             let impact_args = args.into_impact_args();
-            let report = analyze(&impact_args)?;
+            // Bridge the analyzer's progress callback to MCP
+            // `notifications/message` notifications. Clients that
+            // ignore unknown notifications simply see a slightly
+            // delayed `result`; clients that render messages get live
+            // stage updates. The writer is borrowed via RefCell so
+            // the FnMut closure can reach it without a second mut-
+            // borrow on the main `out` handle.
+            let out_cell = RefCell::new(out);
+            let progress = |ev: &ProgressEvent<'_>| {
+                let mut w = out_cell.borrow_mut();
+                let _ = write_progress_notification(&mut **w, ev);
+            };
+            let report = analyze_with_progress(&impact_args, progress)?;
             Ok(text_content(&render_json_report(&impact_args, &report)?))
         }
         "impact_test_filter" => {
@@ -373,6 +389,33 @@ fn text_content(body: &str) -> Value {
             { "type": "text", "text": body }
         ]
     })
+}
+
+/// Emit an MCP `notifications/message` for an analyzer stage update.
+/// Level is `info`; `data` carries the structured stage/current/total
+/// so clients can render a progress bar without string-parsing. Clients
+/// that don't subscribe to messages receive no visible effect.
+fn write_progress_notification(out: &mut impl Write, ev: &ProgressEvent<'_>) -> Result<()> {
+    let mut data = json!({
+        "stage": ev.stage,
+        "current": ev.current,
+        "total": ev.total,
+    });
+    if let Some(d) = ev.detail {
+        data["detail"] = Value::String(d.to_string());
+    }
+    let env = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/message",
+        "params": {
+            "level": "info",
+            "logger": "cargo-impact",
+            "data": data,
+        }
+    });
+    writeln!(out, "{env}")?;
+    out.flush()?;
+    Ok(())
 }
 
 fn write_result(out: &mut impl Write, id: Value, result: Value) -> Result<()> {
@@ -504,6 +547,51 @@ mod tests {
         assert!(!args.semver_checks);
         assert!(!args.rust_analyzer);
         assert!(matches!(args.format, Format::Json));
+    }
+
+    #[test]
+    fn progress_notification_payload_matches_mcp_log_schema() {
+        // Direct check of the writer helper: this isolates the
+        // notification format from the analyzer-invocation plumbing.
+        // Schema: { jsonrpc, method: "notifications/message",
+        // params: { level, logger, data: { stage, current, total, [detail] } } }
+        let mut out: Vec<u8> = Vec::new();
+        let ev = ProgressEvent {
+            stage: "analyzers",
+            current: 3,
+            total: 6,
+            detail: Some("derive"),
+        };
+        write_progress_notification(&mut out, &ev).expect("write");
+        let line = String::from_utf8(out).unwrap();
+        let v: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["method"], "notifications/message");
+        // Notifications have no id per JSON-RPC 2.0.
+        assert!(v.get("id").is_none(), "notifications must omit id");
+        assert_eq!(v["params"]["level"], "info");
+        assert_eq!(v["params"]["logger"], "cargo-impact");
+        assert_eq!(v["params"]["data"]["stage"], "analyzers");
+        assert_eq!(v["params"]["data"]["current"], 3);
+        assert_eq!(v["params"]["data"]["total"], 6);
+        assert_eq!(v["params"]["data"]["detail"], "derive");
+    }
+
+    #[test]
+    fn progress_notification_omits_detail_when_none() {
+        let mut out: Vec<u8> = Vec::new();
+        let ev = ProgressEvent {
+            stage: "done",
+            current: 1,
+            total: 1,
+            detail: None,
+        };
+        write_progress_notification(&mut out, &ev).expect("write");
+        let v: Value = serde_json::from_str(String::from_utf8(out).unwrap().trim()).unwrap();
+        assert!(
+            v["params"]["data"].get("detail").is_none(),
+            "detail must not render when the event carries None"
+        );
     }
 
     #[test]

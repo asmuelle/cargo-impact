@@ -316,6 +316,97 @@ fn mcp_version_tool_responds_to_tools_call_over_stdio() {
 }
 
 #[test]
+fn mcp_impact_analyze_streams_progress_notifications_before_result() {
+    // When a client calls `tools/call impact_analyze`, the server must
+    // emit one or more `notifications/message` events describing stage
+    // progress BEFORE the final `result` arrives. This is the contract
+    // that lets long-running analyses show live feedback instead of a
+    // 30-second silence.
+    use std::io::Write;
+    use std::process::Stdio;
+
+    // Non-trivial workspace so progress has content to emit on (the
+    // pipeline short-circuits on an empty diff and emits nothing).
+    let dir = seed_repo(
+        &[
+            ("Cargo.toml", manifest()),
+            ("src/lib.rs", "pub trait T { fn hi(&self); }\n"),
+        ],
+        &[("src/lib.rs", "pub trait T { fn hi(&self) -> String; }\n")],
+    );
+
+    let mut child = Command::new(binary())
+        .arg("mcp")
+        .current_dir(dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn mcp server");
+
+    let stdin = child.stdin.as_mut().expect("stdin");
+    let manifest_dir = dir.path().to_string_lossy().replace('\\', "/");
+    let req = format!(
+        r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"impact_analyze","arguments":{{"manifest_dir":"{manifest_dir}"}}}}}}"#
+    );
+    writeln!(stdin, "{req}").expect("write");
+    drop(child.stdin.take());
+
+    let out = child.wait_with_output().expect("wait");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "mcp server exited non-zero ({:?})\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status.code()
+    );
+
+    // Parse every non-empty line. Expect at least one notification
+    // message followed by exactly one result with id=7.
+    let mut notifications = Vec::new();
+    let mut result: Option<Value> = None;
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        let v: Value = serde_json::from_str(line).unwrap_or_else(|e| {
+            panic!("parse line `{line}`: {e}\nfull stdout:\n{stdout}\nstderr:\n{stderr}")
+        });
+        if v["method"] == "notifications/message" {
+            notifications.push(v);
+        } else if v["id"] == 7 {
+            result = Some(v);
+        }
+    }
+
+    assert!(
+        !notifications.is_empty(),
+        "expected at least one progress notification; full stdout:\n{stdout}"
+    );
+    // Structural check on the first notification.
+    let first = &notifications[0];
+    assert_eq!(first["params"]["level"], "info");
+    assert!(
+        first["params"]["data"]["stage"].is_string(),
+        "notification data must carry a stage string; got {first}"
+    );
+
+    // A final `done` stage event must appear before the result so
+    // clients can transition their progress UI to complete.
+    let has_done = notifications
+        .iter()
+        .any(|n| n["params"]["data"]["stage"] == "done");
+    assert!(
+        has_done,
+        "expected a `done` progress event; stages seen: {:?}",
+        notifications
+            .iter()
+            .map(|n| n["params"]["data"]["stage"].as_str().unwrap_or(""))
+            .collect::<Vec<_>>()
+    );
+
+    let result = result.expect("no result envelope on stdout");
+    assert!(result["result"]["content"][0]["text"].is_string());
+}
+
+#[test]
 fn json_output_schema_is_stable() {
     // Agents and CI scripts consume this shape — treat it as a contract.
     // If these fields ever need to change, update the schema document in

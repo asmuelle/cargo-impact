@@ -213,13 +213,59 @@ pub struct AnalysisReport {
     pub findings: Vec<Finding>,
 }
 
+/// Single progress update emitted during an analysis run. Surfaced via
+/// [`analyze_with_progress`] so long-running invocations (typically
+/// `--rust-analyzer` or `--semver-checks`) can give the caller a live
+/// signal instead of a 30-second silence.
+///
+/// Stages are a small fixed vocabulary so consumers can map them to
+/// UI strings or progress bars without scraping free text:
+///
+/// * `"symbols"` — collecting top-level items from changed files.
+///   `current`/`total` count files processed.
+/// * `"analyzers"` — running the per-file/per-symbol analyzers.
+///   `total` is the number of analyzer passes; `current` is how many
+///   have completed.
+/// * `"semver_checks"` — invoking `cargo-semver-checks`. Only emitted
+///   when the flag is on; `current`/`total` are both 1 (start/done).
+/// * `"rust_analyzer"` — driving the RA LSP subprocess. Only emitted
+///   when the flag is on; `current`/`total` are both 1.
+/// * `"done"` — final emit, always sent at the end of a successful
+///   run. `current == total`.
+#[derive(Debug, Clone)]
+pub struct ProgressEvent<'a> {
+    pub stage: &'a str,
+    pub current: usize,
+    pub total: usize,
+    pub detail: Option<&'a str>,
+}
+
 /// Run every analyzer and return a structured report.
 ///
 /// This is the single source of truth for "what does cargo-impact think
 /// about this diff?" — [`run`] wraps it with CLI printing / exit-code
 /// handling, the MCP server serializes its output into JSON content, and
 /// integration tests call it directly.
+///
+/// Equivalent to [`analyze_with_progress`] with a no-op callback.
 pub fn analyze(args: &ImpactArgs) -> Result<AnalysisReport> {
+    analyze_with_progress(args, |_| {})
+}
+
+/// Run every analyzer with a progress callback invoked at stage
+/// boundaries. Use this instead of [`analyze`] when the caller wants
+/// live feedback during long invocations — typically the MCP server
+/// bridging the callback to `notifications/message` or an interactive
+/// CLI printing to stderr.
+///
+/// The callback is synchronous: it runs on the analyzer thread, so
+/// keep it cheap (writing a few hundred bytes is fine; blocking on a
+/// network call is not). Order of `stage` values is stable; see
+/// [`ProgressEvent`] for the vocabulary.
+pub fn analyze_with_progress<F>(args: &ImpactArgs, mut progress: F) -> Result<AnalysisReport>
+where
+    F: FnMut(&ProgressEvent<'_>),
+{
     let root = match &args.manifest_dir {
         Some(p) => p.clone(),
         None => std::env::current_dir().context("reading current directory")?,
@@ -243,10 +289,17 @@ pub fn analyze(args: &ImpactArgs) -> Result<AnalysisReport> {
         args.no_default_features,
         args.all_features,
     )?;
-    cfg::with_features(features, || analyze_inner(args, &root))
+    cfg::with_features(features, || analyze_inner(args, &root, &mut progress))
 }
 
-fn analyze_inner(args: &ImpactArgs, root: &std::path::Path) -> Result<AnalysisReport> {
+fn analyze_inner<F>(
+    args: &ImpactArgs,
+    root: &std::path::Path,
+    progress: &mut F,
+) -> Result<AnalysisReport>
+where
+    F: FnMut(&ProgressEvent<'_>),
+{
     let changed_files = git::changed_rust_files(root, &args.since)?;
     if changed_files.is_empty() {
         return Ok(AnalysisReport {
@@ -259,7 +312,14 @@ fn analyze_inner(args: &ImpactArgs, root: &std::path::Path) -> Result<AnalysisRe
     // Collect symbols per changed file, diff-aware when possible; fall back
     // to blanket file-level analysis when the diff can't be computed.
     let mut all_symbols: Vec<symbols::TopLevelSymbol> = Vec::new();
-    for rel in &changed_files {
+    let total_files = changed_files.len();
+    for (i, rel) in changed_files.iter().enumerate() {
+        progress(&ProgressEvent {
+            stage: "symbols",
+            current: i,
+            total: total_files,
+            detail: rel.to_str(),
+        });
         match diff::diff_file(root, rel, &args.since) {
             Ok(Some(items)) => {
                 for it in items {
@@ -282,15 +342,41 @@ fn analyze_inner(args: &ImpactArgs, root: &std::path::Path) -> Result<AnalysisRe
     let symbol_names: BTreeSet<String> = all_symbols.iter().map(|s| s.name.clone()).collect();
     let changed_trait_names = traits::changed_trait_names(&all_symbols);
 
+    // Six syn-based analyzers run in sequence. Emit a stage start per
+    // analyzer so consumers can render a progress bar. Names are
+    // stable; keep them aligned with the source order below.
+    const ANALYZER_STAGES: &[&str] = &[
+        "tests_scan",
+        "traits",
+        "derive",
+        "dyn_dispatch",
+        "doc_drift",
+        "adapters",
+    ];
+    let emit_analyzer = |i: usize, progress: &mut F| {
+        progress(&ProgressEvent {
+            stage: "analyzers",
+            current: i,
+            total: ANALYZER_STAGES.len(),
+            detail: Some(ANALYZER_STAGES[i]),
+        });
+    };
+
     let mut findings = Vec::new();
+    emit_analyzer(0, progress);
     findings.extend(tests_scan::find_affected_tests(root, &symbol_names)?);
+    emit_analyzer(1, progress);
     findings.extend(traits::find_trait_impls(root, &changed_trait_names)?);
+    emit_analyzer(2, progress);
     findings.extend(derive::find_derive_impls(root, &changed_trait_names)?);
+    emit_analyzer(3, progress);
     findings.extend(dyn_dispatch::find_dyn_dispatch_sites(
         root,
         &changed_trait_names,
     )?);
+    emit_analyzer(4, progress);
     findings.extend(doc_drift::find_doc_drift(root, &symbol_names)?);
+    emit_analyzer(5, progress);
     findings.extend(adapters::find_runtime_surfaces(root, &symbol_names)?);
 
     for rel in &changed_files {
@@ -327,11 +413,27 @@ fn analyze_inner(args: &ImpactArgs, root: &std::path::Path) -> Result<AnalysisRe
         }
     }
 
+    if args.semver_checks {
+        progress(&ProgressEvent {
+            stage: "semver_checks",
+            current: 0,
+            total: 1,
+            detail: None,
+        });
+    }
     match semver_checks::run(root, &args.since, args.semver_checks) {
         Ok(hits) => findings.extend(hits),
         Err(e) => eprintln!("cargo-impact: semver-checks failed: {e:#}"),
     }
 
+    if args.rust_analyzer {
+        progress(&ProgressEvent {
+            stage: "rust_analyzer",
+            current: 0,
+            total: 1,
+            detail: None,
+        });
+    }
     match rust_analyzer::run(root, &changed_files, &symbol_names, args.rust_analyzer) {
         Ok(hits) => findings.extend(hits),
         Err(e) => eprintln!("cargo-impact: rust-analyzer failed: {e:#}"),
@@ -377,6 +479,13 @@ fn analyze_inner(args: &ImpactArgs, root: &std::path::Path) -> Result<AnalysisRe
 
     let mut candidate_symbols: Vec<String> = symbol_names.into_iter().collect();
     candidate_symbols.sort();
+
+    progress(&ProgressEvent {
+        stage: "done",
+        current: 1,
+        total: 1,
+        detail: None,
+    });
 
     Ok(AnalysisReport {
         changed_files,
