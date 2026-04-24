@@ -10,6 +10,35 @@ SARIF, MCP tool schemas) are stable across patch releases within a
 minor but may evolve at minor boundaries; breaking changes are called
 out explicitly here.
 
+## [Unreleased]
+
+### Changed
+
+- **Macro expansion beyond MVP.** `--macro-expand` now also emits
+  `TestReference` findings for `#[test]` / `#[tokio::test]` /
+  `#[rstest]` fns whose post-expansion body names a changed symbol
+  — catches the `sqlx::query!("SELECT * FROM users")` case where
+  the raw source has only a literal string but expansion names the
+  referenced struct. Previously only `TraitImpl` findings were
+  emitted. New dedup pass `dedup::dedup_expanded_under_raw` drops
+  expansion test-refs whose test name is already covered by a
+  raw-source `TestReference`, so no double-counting. Behavior
+  unchanged when the flag is off.
+
+### Added
+
+- `tests_scan::is_test_fn` and `tests_scan::tokens_contain_ident`
+  exposed `pub(crate)` for cross-module reuse (was private).
+- `traverses_multi_crate_workspace_members` test locking in
+  `walkdir`-based workspace traversal for standard `[workspace]`
+  layouts.
+
+### Fixed
+
+- CHANGELOG link references for v0.1.0 (which was never
+  git-tagged) now point at the MVP scaffold commit `2fe210e`,
+  unbreaking the Spec workflow's lychee link check.
+
 ## [0.4.0] — 2026-04-24
 
 ### Highlights

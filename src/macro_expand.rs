@@ -23,12 +23,25 @@
 //!
 //! Scope in this release
 //! ---------------------
-//! The MVP here only emits trait-impl findings for traits in the
-//! `changed_traits` set. `cargo expand` output is parsed as a single
-//! large `syn::File` (cargo-expand merges a whole crate into one
-//! stream) and walked for `impl Trait for T` sites. Full coverage
-//! (attribute-macro body re-analysis, proper source-map back to the
-//! unexpanded file) is deferred.
+//! Emits two classes of finding from the expanded `syn::File`
+//! (cargo-expand merges a whole crate into one stream):
+//!
+//! 1. **Expanded trait impls** — `impl Trait for T` blocks where
+//!    `Trait` is in `changed_traits`. Catches derives and attribute
+//!    macros (`#[derive(Serialize)]`, `#[derive(clap::Parser)]`,
+//!    `#[derive(thiserror::Error)]`) that synthesize impls the
+//!    syn-only walker never sees.
+//! 2. **Expanded test references** — `#[test]` / `#[tokio::test]` /
+//!    `#[rstest]` fns whose post-expansion body tokens reference a
+//!    name in `changed_symbols`. Catches the `sqlx::query!(...)`
+//!    case: raw source has a literal string, but the expansion
+//!    names the referenced struct. Dedup against raw-source
+//!    `TestReference` findings happens in `dedup.rs` so we don't
+//!    double-count tests the syn-only walker already caught.
+//!
+//! Still deferred: full source-map back to the unexpanded file for
+//! jump-to-definition (expansion loses line anchors), and expansion
+//! for binary-only crates (we only `cargo expand --lib` today).
 //!
 //! Graceful degradation
 //! --------------------
@@ -40,13 +53,15 @@
 //! the whole run because an optional tool is missing" policy.
 
 use crate::finding::{Finding, FindingKind, Location, Tier};
+use crate::tests_scan::{is_test_fn, tokens_contain_ident};
 use anyhow::Result;
+use quote::ToTokens;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use syn::visit::Visit;
-use syn::{ItemImpl, Path as SynPath, Type, TypePath};
+use syn::{ItemFn, ItemImpl, Path as SynPath, Type, TypePath};
 
 const TOOL_BIN: &str = "cargo-expand";
 
@@ -56,17 +71,23 @@ const TOOL_BIN: &str = "cargo-expand";
 /// doesn't hang the whole pipeline.
 const MACRO_EXPAND_TIMEOUT: Duration = Duration::from_secs(90);
 
-/// Run `cargo expand` and emit findings for trait impls that appear in
-/// the expanded AST and target a changed trait. Dedup against existing
-/// findings is the orchestrator's responsibility (the content-hashed
-/// ID plus the dedup pass already handle it).
+/// Run `cargo expand` and emit findings from the expanded AST: trait
+/// impls matching `changed_traits` plus test references matching
+/// `changed_symbols`. Dedup against existing findings is the
+/// orchestrator's responsibility (the content-hashed ID plus the
+/// dedup passes already handle it).
 ///
 /// Blank IDs on returned findings; the orchestrator fills them in.
-pub fn run(root: &Path, changed_traits: &BTreeSet<String>, enabled: bool) -> Result<Vec<Finding>> {
+pub fn run(
+    root: &Path,
+    changed_traits: &BTreeSet<String>,
+    changed_symbols: &BTreeSet<String>,
+    enabled: bool,
+) -> Result<Vec<Finding>> {
     if !enabled {
         return Ok(Vec::new());
     }
-    if changed_traits.is_empty() {
+    if changed_traits.is_empty() && changed_symbols.is_empty() {
         return Ok(Vec::new());
     }
     if !is_installed() {
@@ -84,16 +105,18 @@ pub fn run(root: &Path, changed_traits: &BTreeSet<String>, enabled: bool) -> Res
             return Ok(Vec::new());
         }
     };
-    Ok(find_impls_in_expanded(&expanded, changed_traits))
+    Ok(find_in_expanded(&expanded, changed_traits, changed_symbols))
 }
 
-/// Parse the expanded-source string and walk for trait impls matching
-/// `changed_traits`. Pulled out of `run` so it's testable without
+/// Parse the expanded-source string and walk for both trait impls
+/// (matching `changed_traits`) and test references (matching
+/// `changed_symbols`). Pulled out of `run` so it's testable without
 /// spawning cargo-expand — any syn-parseable string serves as a
 /// fixture.
-pub(crate) fn find_impls_in_expanded(
+pub(crate) fn find_in_expanded(
     expanded: &str,
     changed_traits: &BTreeSet<String>,
+    changed_symbols: &BTreeSet<String>,
 ) -> Vec<Finding> {
     let Ok(ast) = syn::parse_file(expanded) else {
         eprintln!(
@@ -103,36 +126,59 @@ pub(crate) fn find_impls_in_expanded(
         );
         return Vec::new();
     };
-    let mut visitor = ImplVisitor {
+    let mut visitor = ExpandedVisitor {
         changed_traits,
-        hits: Vec::new(),
+        changed_symbols,
+        impl_hits: Vec::new(),
+        test_hits: Vec::new(),
     };
     visitor.visit_file(&ast);
 
-    visitor
-        .hits
-        .into_iter()
-        .map(|(trait_name, impl_for)| {
-            let evidence = format!(
-                "`impl {trait_name} for {impl_for}` — revealed by macro expansion (syn-only \
-                 analysis doesn't see impls synthesized by derive/attribute macros like \
-                 serde, tokio, clap, thiserror)"
-            );
-            let kind = FindingKind::TraitImpl {
-                trait_name: trait_name.clone(),
-                impl_for: impl_for.clone(),
-                impl_site: Location {
-                    // Synthesized impls don't have a stable source
-                    // location — they live in the expansion of the
-                    // derive that produced them. Use `<expanded>` as a
-                    // sentinel so consumers know not to jump-to-file.
-                    file: std::path::PathBuf::from("<expanded>"),
-                    symbol: format!("impl {trait_name} for {impl_for}"),
-                },
-            };
+    let mut findings = Vec::with_capacity(visitor.impl_hits.len() + visitor.test_hits.len());
+
+    for (trait_name, impl_for) in visitor.impl_hits {
+        let evidence = format!(
+            "`impl {trait_name} for {impl_for}` — revealed by macro expansion (syn-only \
+             analysis doesn't see impls synthesized by derive/attribute macros like \
+             serde, tokio, clap, thiserror)"
+        );
+        let kind = FindingKind::TraitImpl {
+            trait_name: trait_name.clone(),
+            impl_for: impl_for.clone(),
+            impl_site: Location {
+                // Synthesized impls don't have a stable source
+                // location — they live in the expansion of the
+                // derive that produced them. Use `<expanded>` as a
+                // sentinel so consumers know not to jump-to-file.
+                file: std::path::PathBuf::from("<expanded>"),
+                symbol: format!("impl {trait_name} for {impl_for}"),
+            },
+        };
+        findings.push(Finding::new("", Tier::Likely, 0.75, kind, evidence));
+    }
+
+    for (test_name, matched) in visitor.test_hits {
+        let matched_vec: Vec<String> = matched.into_iter().collect();
+        let evidence = format!(
+            "test body references {} after macro expansion (syn-only source walk missed \
+             it — likely a fn-like macro like `sqlx::query!` or `include_str!` that \
+             expands to code naming the changed symbol)",
+            matched_vec.join(", ")
+        );
+        let kind = FindingKind::TestReference {
+            test: Location {
+                file: std::path::PathBuf::from("<expanded>"),
+                symbol: test_name.clone(),
+            },
+            matched_symbols: matched_vec,
+        };
+        findings.push(
             Finding::new("", Tier::Likely, 0.75, kind, evidence)
-        })
-        .collect()
+                .with_suggested_action(format!("cargo nextest run -E 'test({test_name})'")),
+        );
+    }
+
+    findings
 }
 
 fn is_installed() -> bool {
@@ -201,26 +247,46 @@ fn run_cargo_expand(root: &Path) -> Result<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Visitor (duplicated in shape from traits.rs but kept local because
-// the module-level semantics differ — we never match against a per-
-// file path, only against the single merged expansion stream).
+// Visitor — merges trait-impl and test-ref detection over the single
+// expanded stream. Kept local (rather than composed from traits.rs +
+// tests_scan.rs visitors) because `cargo expand` merges the whole
+// crate into one file; we can't cheaply map hits back to per-file
+// paths, so we don't try.
 // ---------------------------------------------------------------------------
 
-struct ImplVisitor<'a> {
+struct ExpandedVisitor<'a> {
     changed_traits: &'a BTreeSet<String>,
-    hits: Vec<(String, String)>,
+    changed_symbols: &'a BTreeSet<String>,
+    impl_hits: Vec<(String, String)>,
+    test_hits: Vec<(String, BTreeSet<String>)>,
 }
 
-impl<'ast> Visit<'ast> for ImplVisitor<'_> {
+impl<'ast> Visit<'ast> for ExpandedVisitor<'_> {
     fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
         if let Some((_, trait_path, _)) = &node.trait_
             && let Some(trait_name) = last_ident(trait_path)
             && self.changed_traits.contains(&trait_name)
         {
             let impl_for = type_to_string(&node.self_ty);
-            self.hits.push((trait_name, impl_for));
+            self.impl_hits.push((trait_name, impl_for));
         }
         syn::visit::visit_item_impl(self, node);
+    }
+
+    fn visit_item_fn(&mut self, f: &'ast ItemFn) {
+        if !self.changed_symbols.is_empty() && is_test_fn(&f.attrs) {
+            let body = f.block.to_token_stream().to_string();
+            let matched: BTreeSet<String> = self
+                .changed_symbols
+                .iter()
+                .filter(|sym| tokens_contain_ident(&body, sym))
+                .cloned()
+                .collect();
+            if !matched.is_empty() {
+                self.test_hits.push((f.sig.ident.to_string(), matched));
+            }
+        }
+        syn::visit::visit_item_fn(self, f);
     }
 }
 
@@ -229,7 +295,6 @@ fn last_ident(path: &SynPath) -> Option<String> {
 }
 
 fn type_to_string(ty: &Type) -> String {
-    use quote::ToTokens;
     if let Type::Path(TypePath { qself: None, path }) = ty
         && let Some(seg) = path.segments.last()
     {
@@ -249,14 +314,14 @@ mod tests {
     #[test]
     fn empty_changed_set_returns_no_findings() {
         let src = "impl Serialize for S {}";
-        let hits = find_impls_in_expanded(src, &BTreeSet::new());
+        let hits = find_in_expanded(src, &BTreeSet::new(), &BTreeSet::new());
         assert!(hits.is_empty());
     }
 
     #[test]
     fn matches_derived_impl_on_changed_trait() {
         let src = "struct S; impl Greeter for S { fn hi(&self) {} }";
-        let hits = find_impls_in_expanded(src, &changed(&["Greeter"]));
+        let hits = find_in_expanded(src, &changed(&["Greeter"]), &BTreeSet::new());
         assert_eq!(hits.len(), 1);
         let FindingKind::TraitImpl {
             trait_name,
@@ -273,7 +338,7 @@ mod tests {
     #[test]
     fn evidence_calls_out_macro_expansion_source() {
         let src = "impl Greeter for S { fn hi(&self) {} }";
-        let hits = find_impls_in_expanded(src, &changed(&["Greeter"]));
+        let hits = find_in_expanded(src, &changed(&["Greeter"]), &BTreeSet::new());
         assert!(
             hits[0].evidence.contains("revealed by macro expansion"),
             "evidence should mark the finding as expansion-derived: {}",
@@ -284,7 +349,7 @@ mod tests {
     #[test]
     fn ignores_impls_on_unchanged_traits() {
         let src = "impl Unrelated for S { }";
-        let hits = find_impls_in_expanded(src, &changed(&["Greeter"]));
+        let hits = find_in_expanded(src, &changed(&["Greeter"]), &BTreeSet::new());
         assert!(hits.is_empty());
     }
 
@@ -293,7 +358,7 @@ mod tests {
         // Expanded output often carries fully-qualified paths;
         // match on the trailing segment only, same as traits.rs.
         let src = "impl ::serde::Serialize for S { }";
-        let hits = find_impls_in_expanded(src, &changed(&["Serialize"]));
+        let hits = find_in_expanded(src, &changed(&["Serialize"]), &BTreeSet::new());
         assert_eq!(hits.len(), 1);
     }
 
@@ -304,13 +369,17 @@ mod tests {
             impl A for Y { }
             impl B for Z { }
         ";
-        let hits = find_impls_in_expanded(src, &changed(&["A", "B"]));
+        let hits = find_in_expanded(src, &changed(&["A", "B"]), &BTreeSet::new());
         assert_eq!(hits.len(), 3);
     }
 
     #[test]
     fn unparseable_input_returns_empty_without_panicking() {
-        let hits = find_impls_in_expanded("this is {{ not syn parseable", &changed(&["X"]));
+        let hits = find_in_expanded(
+            "this is {{ not syn parseable",
+            &changed(&["X"]),
+            &changed(&["Y"]),
+        );
         assert!(hits.is_empty());
     }
 
@@ -318,13 +387,119 @@ mod tests {
     fn disabled_flag_short_circuits_before_calling_cargo() {
         // If the tool weren't installed this would still return Ok(empty)
         // because `enabled = false` short-circuits. Proves the flag gate.
-        let findings = run(Path::new("/nonexistent"), &changed(&["X"]), false).unwrap();
+        let findings = run(
+            Path::new("/nonexistent"),
+            &changed(&["X"]),
+            &BTreeSet::new(),
+            false,
+        )
+        .unwrap();
         assert!(findings.is_empty());
     }
 
     #[test]
-    fn empty_changed_traits_short_circuits_before_spawning() {
-        let findings = run(Path::new("/nonexistent"), &BTreeSet::new(), true).unwrap();
+    fn empty_inputs_short_circuit_before_spawning() {
+        let findings = run(
+            Path::new("/nonexistent"),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            true,
+        )
+        .unwrap();
         assert!(findings.is_empty());
+    }
+
+    // --- Expanded test-reference findings ---
+
+    #[test]
+    fn detects_test_referencing_changed_symbol_in_expanded_body() {
+        // Simulates a test that, after cargo expand, references `User`
+        // — the kind of code `sqlx::query!("SELECT * FROM users")`
+        // expands into. The raw source wouldn't have carried this
+        // reference.
+        let src = r#"
+            #[test]
+            fn query_test() {
+                let _: User = User::default();
+            }
+        "#;
+        let hits = find_in_expanded(src, &BTreeSet::new(), &changed(&["User"]));
+        assert_eq!(hits.len(), 1);
+        let FindingKind::TestReference {
+            test,
+            matched_symbols,
+        } = &hits[0].kind
+        else {
+            panic!("wrong kind: {:?}", hits[0].kind);
+        };
+        assert_eq!(test.symbol, "query_test");
+        assert_eq!(test.file, std::path::PathBuf::from("<expanded>"));
+        assert_eq!(matched_symbols, &vec!["User".to_string()]);
+        assert_eq!(hits[0].tier, Tier::Likely);
+        assert!((hits[0].confidence - 0.75).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn expanded_test_ref_evidence_calls_out_expansion_source() {
+        let src = "#[test] fn t() { User::new(); }";
+        let hits = find_in_expanded(src, &BTreeSet::new(), &changed(&["User"]));
+        assert!(
+            hits[0].evidence.contains("after macro expansion"),
+            "evidence should mark the finding as expansion-derived: {}",
+            hits[0].evidence
+        );
+    }
+
+    #[test]
+    fn expanded_test_ref_emits_nextest_filter_suggestion() {
+        let src = "#[test] fn login_case() { login(); }";
+        let hits = find_in_expanded(src, &BTreeSet::new(), &changed(&["login"]));
+        assert!(
+            hits[0]
+                .suggested_action
+                .as_deref()
+                .is_some_and(|s| s.contains("test(login_case)")),
+            "expected nextest filter suggestion, got {:?}",
+            hits[0].suggested_action
+        );
+    }
+
+    #[test]
+    fn non_test_fns_are_not_emitted_as_test_refs() {
+        let src = "fn helper() { let _ = User::default(); }";
+        let hits = find_in_expanded(src, &BTreeSet::new(), &changed(&["User"]));
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn expanded_test_ref_respects_word_boundaries() {
+        // `user_profile` must not match the changed symbol `user`.
+        let src = "#[test] fn t() { let user_profile = 1; let _ = user_profile; }";
+        let hits = find_in_expanded(src, &BTreeSet::new(), &changed(&["user"]));
+        assert!(hits.is_empty(), "unexpected hits: {hits:?}");
+    }
+
+    #[test]
+    fn impl_and_test_findings_emitted_together_from_same_stream() {
+        let src = r#"
+            struct User;
+            impl Greeter for User { fn hi(&self) {} }
+            #[test]
+            fn uses_user() {
+                let _ = User;
+            }
+        "#;
+        let hits = find_in_expanded(src, &changed(&["Greeter"]), &changed(&["User"]));
+        assert_eq!(hits.len(), 2);
+        let kinds: Vec<_> = hits
+            .iter()
+            .map(|h| match &h.kind {
+                FindingKind::TraitImpl { .. } => "impl",
+                FindingKind::TestReference { .. } => "test",
+                _ => "other",
+            })
+            .collect();
+        assert!(kinds.contains(&"impl"));
+        assert!(kinds.contains(&"test"));
     }
 }

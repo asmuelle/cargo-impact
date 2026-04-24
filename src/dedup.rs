@@ -15,10 +15,18 @@
 //! doesn't carry a targetable name (BuildScriptChanged, FfiSignatureChange,
 //! DocDriftLink/Keyword — those attach to the doc file, not a code
 //! callsite) pass through untouched.
+//!
+//! A second dedup pass, [`dedup_expanded_under_raw`], drops macro-expansion
+//! findings (file = `<expanded>`) whose test name is already covered by a
+//! raw-source `TestReference`. Expanded trait-impls are kept — they typically
+//! come from derives whose synthesized impls don't appear in any source file,
+//! so the raw-source analyzer never emits them in the first place.
 
 use crate::finding::{Finding, FindingKind, Tier};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+
+const EXPANDED_SENTINEL: &str = "<expanded>";
 
 /// Drop syn-only findings that are redundant with Proven RA findings at
 /// the same (name, file) pair. Runs after all analyzers have pushed
@@ -67,6 +75,39 @@ fn is_shadowed(f: &Finding, keys: &BTreeSet<(String, PathBuf)>) -> bool {
         | FindingKind::DynDispatch { trait_name, .. } => keys.contains(&(trait_name.clone(), file)),
         _ => false,
     }
+}
+
+/// Drop macro-expansion `TestReference` findings whose test name is
+/// already covered by a raw-source `TestReference`. Without this, a
+/// test that genuinely calls a changed symbol in its raw body (caught
+/// by `tests_scan.rs`) and whose expansion also carries that reference
+/// (caught here) would fire twice. The raw-source finding wins because
+/// it has a real file path and a stronger confidence (0.85 vs 0.75).
+pub fn dedup_expanded_under_raw(findings: &mut Vec<Finding>) {
+    let raw_test_names = collect_raw_test_names(findings);
+    if raw_test_names.is_empty() {
+        return;
+    }
+    findings.retain(|f| !is_expanded_test_shadowed(f, &raw_test_names));
+}
+
+fn collect_raw_test_names(findings: &[Finding]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for f in findings {
+        if let FindingKind::TestReference { test, .. } = &f.kind
+            && test.file != Path::new(EXPANDED_SENTINEL)
+        {
+            names.insert(test.symbol.clone());
+        }
+    }
+    names
+}
+
+fn is_expanded_test_shadowed(f: &Finding, raw_test_names: &BTreeSet<String>) -> bool {
+    let FindingKind::TestReference { test, .. } = &f.kind else {
+        return false;
+    };
+    test.file == Path::new(EXPANDED_SENTINEL) && raw_test_names.contains(&test.symbol)
 }
 
 #[cfg(test)]
@@ -251,5 +292,90 @@ mod tests {
             findings.iter().filter(|f| f.tier == Tier::Likely).count(),
             1
         );
+    }
+
+    // --- dedup_expanded_under_raw ---
+
+    fn expanded_test_ref(test_symbol: &str, matched: &[&str]) -> Finding {
+        Finding::new(
+            "",
+            Tier::Likely,
+            0.75,
+            FindingKind::TestReference {
+                test: Location {
+                    file: PathBuf::from(EXPANDED_SENTINEL),
+                    symbol: test_symbol.into(),
+                },
+                matched_symbols: matched.iter().map(|s| (*s).to_string()).collect(),
+            },
+            "expanded test",
+        )
+    }
+
+    #[test]
+    fn expanded_test_shadowed_by_raw_with_same_name() {
+        let mut findings = vec![
+            test_ref("tests/auth.rs", "t_login", &["login"]),
+            expanded_test_ref("t_login", &["login"]),
+        ];
+        dedup_expanded_under_raw(&mut findings);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].primary_path().unwrap(),
+            Path::new("tests/auth.rs")
+        );
+    }
+
+    #[test]
+    fn expanded_test_with_no_raw_counterpart_survives() {
+        // The `sqlx::query!` case: the raw source never fires a
+        // TestReference for `t_query` because the changed symbol only
+        // appears after expansion. No raw to dedup against → keep it.
+        let mut findings = vec![expanded_test_ref("t_query", &["User"])];
+        dedup_expanded_under_raw(&mut findings);
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn expanded_trait_impls_are_never_shadowed_by_raw_test_refs() {
+        // Derived trait impls from macros (e.g., `#[derive(Serialize)]`)
+        // don't have a source counterpart — they should pass through.
+        let expanded_impl = Finding::new(
+            "",
+            Tier::Likely,
+            0.75,
+            FindingKind::TraitImpl {
+                trait_name: "Serialize".into(),
+                impl_for: "User".into(),
+                impl_site: Location {
+                    file: PathBuf::from(EXPANDED_SENTINEL),
+                    symbol: "impl Serialize for User".into(),
+                },
+            },
+            "expanded impl",
+        );
+        let mut findings = vec![
+            test_ref("tests/auth.rs", "t_login", &["login"]),
+            expanded_impl,
+        ];
+        dedup_expanded_under_raw(&mut findings);
+        assert_eq!(findings.len(), 2);
+    }
+
+    #[test]
+    fn empty_findings_is_noop() {
+        let mut findings: Vec<Finding> = Vec::new();
+        dedup_expanded_under_raw(&mut findings);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn expanded_with_different_test_name_survives() {
+        let mut findings = vec![
+            test_ref("tests/auth.rs", "t_login", &["login"]),
+            expanded_test_ref("t_query", &["User"]),
+        ];
+        dedup_expanded_under_raw(&mut findings);
+        assert_eq!(findings.len(), 2);
     }
 }

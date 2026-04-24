@@ -105,7 +105,7 @@ impl<'ast> Visit<'ast> for TestVisitor<'_> {
     }
 }
 
-fn is_test_fn(attrs: &[Attribute]) -> bool {
+pub(crate) fn is_test_fn(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|a| {
         a.path()
             .segments
@@ -118,7 +118,7 @@ fn is_test_fn(attrs: &[Attribute]) -> bool {
 /// Word-boundary identifier search. Relies on `quote`'s token-stream producing
 /// whitespace between adjacent tokens, so splitting on non-word characters is
 /// reliable — `"user"` never matches `"user_profile"`.
-fn tokens_contain_ident(haystack: &str, needle: &str) -> bool {
+pub(crate) fn tokens_contain_ident(haystack: &str, needle: &str) -> bool {
     haystack
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .any(|tok| tok == needle)

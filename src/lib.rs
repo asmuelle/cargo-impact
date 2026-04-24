@@ -601,7 +601,7 @@ where
             detail: None,
         });
     }
-    match macro_expand::run(root, &changed_trait_names, args.macro_expand) {
+    match macro_expand::run(root, &changed_trait_names, &symbol_names, args.macro_expand) {
         Ok(hits) => findings.extend(hits),
         Err(e) => eprintln!("cargo-impact: macro-expand failed: {e:#}"),
     }
@@ -612,6 +612,13 @@ where
     // never consume IDs or affect summary counts. No-op when RA is off
     // or returned nothing.
     dedup::dedup_syn_under_proven(&mut findings);
+
+    // Drop macro-expansion TestReference findings whose test name is
+    // already covered by a raw-source TestReference. Expansion-backed
+    // findings share the `<expanded>` sentinel path so they'd otherwise
+    // double-count tests the syn-only walker already caught. No-op when
+    // --macro-expand is off or expansion produced no test-refs.
+    dedup::dedup_expanded_under_raw(&mut findings);
 
     // Apply .impactignore filtering before confidence threshold and ID
     // assignment — ignored findings shouldn't consume ID slots or affect
