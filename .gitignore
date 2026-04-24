@@ -22,3 +22,4 @@ target
 
 # Claude Code — per-user overrides stay out of git; settings.json (team) is committed.
 .claude/settings.local.json
+.claude/scheduled_tasks.lock

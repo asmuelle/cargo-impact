@@ -98,6 +98,7 @@ dependencies = [
  "anyhow",
  "clap",
  "criterion",
+ "proc-macro2",
  "quote",
  "serde",
  "serde_json",

@@ -16,6 +16,10 @@ categories = [
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+# span-locations is required for `Span::start()` / `end()`, used by
+# ref_context.rs to map an RA reference line back to its enclosing
+# fn / impl / module.
+proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

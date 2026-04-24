@@ -51,6 +51,7 @@ mod ignore;
 pub mod log_miss;
 pub mod mcp;
 mod nextest;
+mod ref_context;
 mod rust_analyzer;
 mod semver_checks;
 mod symbols;

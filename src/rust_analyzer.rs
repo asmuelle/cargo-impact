@@ -32,18 +32,22 @@
 //!   doesn't finish indexing in time, we log to stderr and return no
 //!   findings rather than failing the whole run.
 //!
-//! Deferred to later v0.3 iterations:
+//! Shipped in v0.4-stretch:
+//! * Per-reference severity refinement via `ref_context::classify`.
+//!   Each reference's enclosing context (test fn / impl block / plain
+//!   caller) is determined by syn-parsing the referencing file and
+//!   walking the AST at the reference's line; severity is adjusted
+//!   accordingly while confidence stays at the same `Proven 0.98`.
+//!
+//! Deferred to later iterations:
 //! * Cross-crate workspaces with non-trivial `[workspace]` layouts (we
 //!   trust RA's own discovery from the root; mostly fine but not
 //!   explicitly tested).
 //! * `textDocument/didOpen` push for files RA hasn't auto-indexed —
 //!   normally RA finds them via Cargo, but edge cases exist.
-//! * Tiering refinement: currently every resolved reference is
-//!   `Proven 0.98`. A follow-up can walk upward from the reference
-//!   location to determine whether it sits inside a `#[test]` fn, an
-//!   `impl` block, or plain caller, and tag severity accordingly.
 
 use crate::finding::{Finding, FindingKind, Location, Tier};
+use crate::ref_context;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -166,6 +170,21 @@ fn collect_references_for_file(
         let refs = client.references(abs, sym.line, sym.character, deadline)?;
         for loc in refs {
             let target_file = uri_to_relative_path(&loc.uri, abs.parent().unwrap_or(abs));
+            // Classify the reference's enclosing context (test fn,
+            // impl block, plain caller) to refine severity. The file
+            // we classify is the *referencing* file — that's where
+            // `loc` points. `loc.uri` is resolved to an absolute path
+            // via uri_to_absolute_path; if it can't be resolved we
+            // keep the default severity (Medium) by letting classify()
+            // fall back to Caller on a missing-file read.
+            let referencing_abs = uri_to_absolute_path(&loc.uri).unwrap_or_else(|| {
+                // Fallback: if we can't extract an abs path from the
+                // URI, attempt the join-with-base heuristic. Happens
+                // for URIs pointing into external crate sources under
+                // weird schemes.
+                abs.parent().unwrap_or(abs).join(&target_file)
+            });
+            let context = ref_context::classify(&referencing_abs, loc.line + 1);
             let finding = Finding::new(
                 "",
                 Tier::Proven,
@@ -184,7 +203,8 @@ fn collect_references_for_file(
                     sym.name,
                     rel.display()
                 ),
-            );
+            )
+            .with_severity(context.refined_severity());
             findings.push(finding);
         }
     }
@@ -560,6 +580,19 @@ fn path_to_uri(p: &Path) -> String {
         s.insert(0, '/');
     }
     format!("file://{s}")
+}
+
+/// Extract the absolute path from a `file://` URI without resolving
+/// against any base. Returns `None` for non-file URIs. Uses the same
+/// drive-letter detection as `uri_to_relative_path` to handle Unix and
+/// Windows URI shapes identically regardless of host.
+fn uri_to_absolute_path(uri: &str) -> Option<PathBuf> {
+    let stripped = uri.strip_prefix("file://")?;
+    let path_str = stripped
+        .strip_prefix('/')
+        .and_then(has_drive_letter)
+        .unwrap_or(stripped);
+    Some(PathBuf::from(path_str))
 }
 
 fn uri_to_relative_path(uri: &str, base: &Path) -> PathBuf {

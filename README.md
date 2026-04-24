@@ -594,7 +594,7 @@ The minimum set that makes the CI-gate story real. If v0.4 ships with only these
 Higher-value precision improvements that depend on the core being landed first. Any of these would be individually a meaningful release; we ship whichever are ready.
 
 *   **Full macro expansion via `cargo expand` / HIR** — promotes many `Likely` findings to something closer to `Proven` by resolving serde, tokio, axum, clap, thiserror, and similar derive/attribute-macro outputs. The hardest piece of the precision story still outstanding; see §3A for scope.
-*   **Per-reference severity refinement** — rust-analyzer already knows whether a reference sits inside a `#[test] fn`, an `impl` block, or plain caller code. Use `documentSymbol` hierarchy to walk upward from each `ResolvedReference` and upgrade severity accordingly.
+*   ✅ **Per-reference severity refinement** — _shipped._ Each `ResolvedReference` is classified by its enclosing container: test fn → `Low` (test-only), impl block → `High` (impl breakage propagates), caller → `Medium` (default). Syn-based classifier in `src/ref_context.rs`; RA still resolves the reference, we refine the severity.
 *   ✅ **syn/RA finding dedup and tier upgrade** — _shipped._ When a syn analyzer flags a site `Likely` and RA confirms it at `Proven`, the syn finding is dropped so the report doesn't double-count. See `src/dedup.rs`.
 *   **`--feature-powerset` (CI mode)** — runs analysis across feature combinations and surfaces findings that the default-feature view missed. Expensive (O(2^N) with feature count); documented as CI-only.
 *   **Streaming progress over MCP** — `$/progress`-style notifications for long analyses so agents see "50 of 200 files analyzed" rather than a 30-second silence.
