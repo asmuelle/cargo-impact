@@ -1,20 +1,63 @@
 //! `cargo-impact` — blast-radius analysis for Rust workspaces.
 //!
-//! This is v0.2 per the README §11 roadmap. Shipped:
+//! This is v0.4 per the README §11 roadmap. The headline shipped
+//! surface, end-to-end:
 //!
-//! * Confidence tiers with numeric scores ([`finding::Tier`])
-//! * Test-reference detection (`Likely 0.85`)
-//! * Trait ripple — `impl Trait for T` blocks flagged when the trait
-//!   definition lives in a changed file (`Likely 0.80`, High severity)
-//! * `dyn Trait` dispatch sites for changed traits (`Likely 0.75`)
-//! * Documentation drift — intra-doc links (`Likely 0.90`) and
-//!   keyword mentions (`Possible 0.40`) for changed symbols
-//! * `--format={text,markdown,json}` — JSON envelope matches README §8
-//! * `--confidence-min` and `--fail-on={high,medium,low}` for CI
+//! Core analyzers — [`Finding`], [`FindingKind`], [`Tier`]
+//! * Confidence tiers (`Proven` / `Likely` / `Possible` / `Unknown`)
+//!   with numeric scores; only RA-backed resolution reaches `Proven`.
+//! * Test-reference detection, trait ripple (`impl Trait for T`),
+//!   `dyn Trait` dispatch, derive-macro impl fan-out, documentation
+//!   drift (intra-doc links + keyword fallback), FFI signature
+//!   changes, `build.rs` change detection, per-method trait-definition
+//!   classification (required vs. default vs. signature vs. body).
+//! * Framework adapters: axum / clap (v0.3) + actix-web / rocket
+//!   (v0.4-stretch), HTTP-verb attribute macros shared across.
 //!
-//! Deferred to a follow-up pass (still within v0.2 scope):
-//! macro expansion, `cargo-semver-checks` integration, and live
-//! `--features` / `--all-features` re-analysis. See §11.
+//! Public-API precision
+//! * `cargo-semver-checks` integration (opt-in via `--semver-checks`).
+//! * rust-analyzer LSP client for `Proven`-tier resolved references;
+//!   per-reference severity refinement based on enclosing container
+//!   (test fn → `Low`, impl block → `High`, caller → `Medium`).
+//! * Macro expansion via `cargo expand` (opt-in via `--macro-expand`)
+//!   for derive/attribute-macro impls that syn-only analysis can't see.
+//!
+//! Orchestration
+//! * Content-hashed finding IDs, stable across runs — powers
+//!   `impact_explain` round-trip by ID.
+//! * syn/RA dedup: syn-only findings covered by a Proven
+//!   `ResolvedReference` at the same `(name, file)` pair are dropped.
+//! * Depth-1 `--feature-powerset` (baseline + no-default + all-features)
+//!   with evidence annotation identifying the set that revealed each
+//!   finding.
+//! * cfg-aware AST filtering against the resolved feature set
+//!   (`--features` / `--all-features` / `--no-default-features`).
+//!
+//! Output
+//! * `--format={text,markdown,json,sarif,pr-comment}` — SARIF v2.1.0
+//!   renders on GitHub code scanning; pr-comment is optimized for
+//!   sticky PR comments (collapsed `<details>` per severity).
+//! * Deterministic: two runs over the same diff produce byte-identical
+//!   output across every format.
+//! * `--budget=<N>` chars for rendered markdown, for agent context
+//!   windows.
+//! * `--context` emits a newline-delimited file list for piping into
+//!   `cargo-context --files-from -`.
+//! * `--confidence-min` and `--fail-on={high,medium,low}` for CI gating.
+//!
+//! MCP surface (`cargo impact mcp`)
+//! * Six tools: `impact_analyze`, `impact_test_filter`, `impact_surface`,
+//!   `impact_semver`, `impact_explain`, `impact_version`.
+//! * `impact_analyze` streams `notifications/message` progress events
+//!   at analyzer stage boundaries so long runs give live feedback.
+//!
+//! Honest caveats (surface when asked "why didn't cargo-impact flag X?"):
+//! * `cfg_attr(feature = "x", derive(…))` is invisible to our analyzer
+//!   — over-counts slightly when users conditionally derive.
+//! * Macro expansion is opt-in and points to a synthetic `<expanded>`
+//!   file rather than source-mapping back to the derive site.
+//! * `log-miss` records stay on disk only (`target/ai-tools-cache/`);
+//!   we never phone home.
 //!
 //! # Programmatic use
 //!
