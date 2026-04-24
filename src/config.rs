@@ -171,6 +171,7 @@ mod tests {
             budget: 0,
             context: false,
             feature_powerset: false,
+            macro_expand: false,
         }
     }
 

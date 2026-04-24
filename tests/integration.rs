@@ -315,6 +315,63 @@ fn mcp_version_tool_responds_to_tools_call_over_stdio() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn macro_expand_flag_is_graceful_when_tool_is_unavailable() {
+    // Ensures the CLI accepts --macro-expand and degrades cleanly
+    // when `cargo-expand` is missing from PATH. Removing the tool
+    // from PATH is the reliable cross-platform way to simulate
+    // "tool not installed" without uninstalling the user's actual
+    // cargo-expand binary — we scrub PATH for the child, not ours.
+    //
+    // On a fresh CI runner cargo-expand is usually absent anyway,
+    // so this doubles as the "tool missing" path coverage without
+    // needing a branch on `is_installed()`.
+    let dir = seed_repo(
+        &[
+            ("Cargo.toml", manifest()),
+            ("src/lib.rs", "pub trait T { fn hi(&self); }\n"),
+        ],
+        &[("src/lib.rs", "pub trait T { fn hi(&self) -> String; }\n")],
+    );
+
+    // PATH is trimmed to system dirs only — enough for `git` (which
+    // the analyzer shells to) but essentially guaranteed not to contain
+    // cargo-expand, which normally lives under `~/.cargo/bin` on end-
+    // user machines. The goal is to exercise the "tool not installed"
+    // branch deterministically regardless of host setup.
+    let slim_path = "/usr/bin:/bin";
+    let mut cmd = Command::new(binary());
+    cmd.arg("--manifest-dir")
+        .arg(dir.path())
+        .arg("--macro-expand")
+        .arg("--format")
+        .arg("json")
+        .env("PATH", slim_path);
+    let out = cmd.output().expect("spawn cargo-impact");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // Whether or not cargo-expand was found, the run must not crash
+    // on the --macro-expand flag alone, and must still emit a
+    // well-formed JSON report.
+    assert!(
+        out.status.success(),
+        "--macro-expand caused non-zero exit unexpectedly. stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let _: Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!(
+            "invalid JSON output with --macro-expand. stdout:\n{stdout}\nstderr:\n{stderr}\nerr: {e}"
+        )
+    });
+    // With PATH scrubbed, the stderr notice must mention the missing
+    // tool so users know why they got no expansion-backed findings.
+    assert!(
+        stderr.contains("cargo-expand") || stderr.contains("macro-expand"),
+        "expected stderr to mention cargo-expand when the tool is unavailable. stderr:\n{stderr}"
+    );
+}
+
 #[test]
 fn feature_powerset_surfaces_findings_hidden_under_default_features() {
     // Fixture: a trait and two impls — one visible at defaults, the

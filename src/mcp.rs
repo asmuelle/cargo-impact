@@ -247,6 +247,14 @@ fn input_schema_analyze() -> Value {
                                 --no-default-features + --all-features and \
                                 annotate findings revealed only under non-baseline \
                                 sets. CI-oriented; roughly triples run time."
+            },
+            "macro_expand": {
+                "type": "boolean",
+                "description": "Shell to `cargo expand` to reveal trait impls \
+                                synthesized by derive/attribute macros (serde, \
+                                tokio, clap, thiserror). Requires cargo-expand \
+                                on PATH; adds 10-60s depending on crate size. \
+                                Graceful no-op if the tool is missing."
             }
         }
     })
@@ -277,6 +285,8 @@ struct AnalyzeArgs {
     budget: Option<usize>,
     #[serde(default)]
     feature_powerset: Option<bool>,
+    #[serde(default)]
+    macro_expand: Option<bool>,
 }
 
 impl AnalyzeArgs {
@@ -298,6 +308,7 @@ impl AnalyzeArgs {
             // bare file-list. --context is a CLI-only output mode.
             context: false,
             feature_powerset: self.feature_powerset.unwrap_or(false),
+            macro_expand: self.macro_expand.unwrap_or(false),
         }
     }
 }

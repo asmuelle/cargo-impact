@@ -49,6 +49,7 @@ pub mod format;
 mod git;
 mod ignore;
 pub mod log_miss;
+mod macro_expand;
 pub mod mcp;
 mod nextest;
 mod ref_context;
@@ -175,6 +176,16 @@ pub struct ImpactArgs {
     /// `--no-default-features`.
     #[arg(long)]
     pub no_default_features: bool,
+
+    /// Opt in to `cargo-expand`-backed trait-impl detection for impls
+    /// synthesized by derive and attribute macros (serde, tokio,
+    /// clap, thiserror, …). Requires `cargo-expand` on PATH; install
+    /// via `cargo install cargo-expand`. When absent or expansion
+    /// fails, a stderr warning is printed and the check is skipped
+    /// (non-fatal). Off by default because the expansion pass adds
+    /// 10-60s depending on crate size.
+    #[arg(long)]
+    pub macro_expand: bool,
 
     /// Run analysis across a depth-1 feature powerset (baseline +
     /// `--no-default-features` + `--all-features`) and surface
@@ -537,6 +548,19 @@ where
     match rust_analyzer::run(root, &changed_files, &symbol_names, args.rust_analyzer) {
         Ok(hits) => findings.extend(hits),
         Err(e) => eprintln!("cargo-impact: rust-analyzer failed: {e:#}"),
+    }
+
+    if args.macro_expand {
+        progress(&ProgressEvent {
+            stage: "macro_expand",
+            current: 0,
+            total: 1,
+            detail: None,
+        });
+    }
+    match macro_expand::run(root, &changed_trait_names, args.macro_expand) {
+        Ok(hits) => findings.extend(hits),
+        Err(e) => eprintln!("cargo-impact: macro-expand failed: {e:#}"),
     }
 
     // Drop syn-only Likely findings that a Proven RA ResolvedReference
