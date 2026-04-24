@@ -26,9 +26,12 @@
 //! * We do not follow derive-alias macros: `#[derive(MyBundle)]` where
 //!   `MyBundle` is itself a user-defined proc-macro that further derives
 //!   other traits will only flag on `MyBundle` literally, not its members.
-//! * `#[cfg_attr(feature = "x", derive(Y))]` is currently invisible — the
-//!   cfg filter works on items, not on per-attribute conditional
-//!   derivation. Over-counts slightly when users conditionally derive.
+//! * `#[cfg_attr(feature = "x", derive(Y))]` **is** recognized now. The
+//!   predicate is evaluated against the active feature set: under
+//!   `FeatureSet::Permissive` every cfg_attr is treated as active (the
+//!   project-wide over-report stance); under `FeatureSet::Exact` we
+//!   evaluate the predicate precisely. Derives nested inside cfg_attr
+//!   with unsatisfied predicates are dropped.
 
 use crate::finding::{Finding, FindingKind, Location, Tier};
 use crate::tests_scan::workspace_rust_files;
@@ -111,26 +114,95 @@ fn collect_derives(
     changed_traits: &BTreeSet<String>,
     hits: &mut Vec<(String, String)>,
 ) {
+    let features = crate::cfg::current_features();
     for attr in attrs {
-        if !attr.path().is_ident("derive") {
-            continue;
+        if attr.path().is_ident("derive") {
+            collect_from_derive_attr(attr, type_name, changed_traits, hits);
+        } else if attr.path().is_ident("cfg_attr") {
+            collect_from_cfg_attr(attr, type_name, changed_traits, &features, hits);
         }
-        // `#[derive(A, B, C)]` → parse the paren contents as a comma-separated
-        // list of paths. Ignore attributes that don't parse — better to miss
-        // a rare form than to crash on unfamiliar syntax.
-        let Ok(paths) = attr.parse_args_with(|input: syn::parse::ParseStream<'_>| {
-            let punct: syn::punctuated::Punctuated<syn::Path, syn::Token![,]> =
-                syn::punctuated::Punctuated::parse_terminated(input)?;
-            Ok(punct.into_iter().collect::<Vec<_>>())
-        }) else {
-            continue;
-        };
-        for path in paths {
-            if let Some(last) = path.segments.last() {
-                let name = last.ident.to_string();
-                if changed_traits.contains(&name) {
-                    hits.push((name, type_name.to_string()));
+    }
+}
+
+fn collect_from_derive_attr(
+    attr: &syn::Attribute,
+    type_name: &str,
+    changed_traits: &BTreeSet<String>,
+    hits: &mut Vec<(String, String)>,
+) {
+    // `#[derive(A, B, C)]` → parse the paren contents as a comma-separated
+    // list of paths. Ignore attributes that don't parse — better to miss
+    // a rare form than to crash on unfamiliar syntax.
+    let Ok(paths) = attr.parse_args_with(|input: syn::parse::ParseStream<'_>| {
+        let punct: syn::punctuated::Punctuated<syn::Path, syn::Token![,]> =
+            syn::punctuated::Punctuated::parse_terminated(input)?;
+        Ok(punct.into_iter().collect::<Vec<_>>())
+    }) else {
+        return;
+    };
+    for path in paths {
+        if let Some(last) = path.segments.last() {
+            let name = last.ident.to_string();
+            if changed_traits.contains(&name) {
+                hits.push((name, type_name.to_string()));
+            }
+        }
+    }
+}
+
+/// Handle `#[cfg_attr(predicate, attr1, attr2, ...)]`. If the predicate
+/// is true under the active feature set, scan each nested attribute
+/// for `derive(...)` calls and harvest their arguments the same way
+/// `collect_from_derive_attr` does.
+fn collect_from_cfg_attr(
+    attr: &syn::Attribute,
+    type_name: &str,
+    changed_traits: &BTreeSet<String>,
+    features: &crate::cfg::FeatureSet,
+    hits: &mut Vec<(String, String)>,
+) {
+    let Ok(metas) = attr.parse_args_with(|input: syn::parse::ParseStream<'_>| {
+        let punct: syn::punctuated::Punctuated<syn::Meta, syn::Token![,]> =
+            syn::punctuated::Punctuated::parse_terminated(input)?;
+        Ok(punct.into_iter().collect::<Vec<_>>())
+    }) else {
+        return;
+    };
+
+    // First element is the predicate; remainder are the nested attributes.
+    let Some((predicate, nested)) = metas.split_first() else {
+        return;
+    };
+    if !crate::cfg::eval_cfg_meta(predicate, features) {
+        return;
+    }
+
+    for meta in nested {
+        match meta {
+            // `derive(A, B)` nested inside cfg_attr — the common case.
+            syn::Meta::List(list) if list.path.is_ident("derive") => {
+                let Ok(paths) = list.parse_args_with(|input: syn::parse::ParseStream<'_>| {
+                    let punct: syn::punctuated::Punctuated<syn::Path, syn::Token![,]> =
+                        syn::punctuated::Punctuated::parse_terminated(input)?;
+                    Ok(punct.into_iter().collect::<Vec<_>>())
+                }) else {
+                    continue;
+                };
+                for path in paths {
+                    if let Some(last) = path.segments.last() {
+                        let name = last.ident.to_string();
+                        if changed_traits.contains(&name) {
+                            hits.push((name, type_name.to_string()));
+                        }
+                    }
                 }
+            }
+            _ => {
+                // Other nested attributes (`doc = "..."`, nested
+                // `cfg_attr(...)`, etc.) don't produce derive impls at
+                // this level. Stacked `cfg_attr(a, cfg_attr(b, derive))`
+                // is rare enough we accept the miss rather than build a
+                // recursive Meta→Attribute synthesizer.
             }
         }
     }
@@ -247,6 +319,117 @@ mod tests {
         let dir = setup(&[("src/lib.rs", "#[derive(Greeter)]\nstruct Foo;\n")]);
         let hits = find_derive_impls(dir.path(), &BTreeSet::new()).unwrap();
         assert!(hits.is_empty());
+    }
+
+    // --- cfg_attr-wrapped derives ---
+
+    #[test]
+    fn cfg_attr_derive_detected_under_permissive() {
+        // Default feature set is Permissive — all cfg predicates are
+        // treated as active, so cfg_attr-wrapped derives fire.
+        let dir = setup(&[(
+            "src/lib.rs",
+            r#"#[cfg_attr(feature = "serde", derive(Greeter))]
+               struct Foo;"#,
+        )]);
+        let hits = find_derive_impls(dir.path(), &traits(&["Greeter"])).unwrap();
+        assert_eq!(
+            payloads(&hits),
+            vec![("Greeter".to_string(), "Foo".to_string())]
+        );
+    }
+
+    #[test]
+    fn cfg_attr_multi_derive_emits_one_finding_per_match() {
+        let dir = setup(&[(
+            "src/lib.rs",
+            r#"#[cfg_attr(feature = "serde", derive(Debug, Greeter, Clone))]
+               struct Foo;"#,
+        )]);
+        let hits = find_derive_impls(dir.path(), &traits(&["Greeter"])).unwrap();
+        assert_eq!(hits.len(), 1);
+        let hits_multi =
+            find_derive_impls(dir.path(), &traits(&["Debug", "Greeter", "Clone"])).unwrap();
+        assert_eq!(hits_multi.len(), 3);
+    }
+
+    #[test]
+    fn cfg_attr_dropped_when_predicate_false_under_exact_featureset() {
+        let dir = setup(&[(
+            "src/lib.rs",
+            r#"#[cfg_attr(feature = "serde", derive(Greeter))]
+               struct Foo;"#,
+        )]);
+        // Install a FeatureSet that doesn't include "serde" so the
+        // predicate evaluates false; the cfg_attr derive should drop.
+        let hits =
+            crate::cfg::with_features(crate::cfg::FeatureSet::Exact(BTreeSet::new()), || {
+                find_derive_impls(dir.path(), &traits(&["Greeter"])).unwrap()
+            });
+        assert!(hits.is_empty(), "unexpected hits: {hits:?}");
+    }
+
+    #[test]
+    fn cfg_attr_kept_when_predicate_true_under_exact_featureset() {
+        let dir = setup(&[(
+            "src/lib.rs",
+            r#"#[cfg_attr(feature = "serde", derive(Greeter))]
+               struct Foo;"#,
+        )]);
+        let active: BTreeSet<String> = std::iter::once("serde".to_string()).collect();
+        let hits = crate::cfg::with_features(crate::cfg::FeatureSet::Exact(active), || {
+            find_derive_impls(dir.path(), &traits(&["Greeter"])).unwrap()
+        });
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn cfg_attr_with_not_combinator_evaluates_correctly() {
+        let dir = setup(&[(
+            "src/lib.rs",
+            r#"#[cfg_attr(not(feature = "legacy"), derive(Greeter))]
+               struct Foo;"#,
+        )]);
+        // Empty feature set → `not(feature = "legacy")` is true → derive fires.
+        let hits =
+            crate::cfg::with_features(crate::cfg::FeatureSet::Exact(BTreeSet::new()), || {
+                find_derive_impls(dir.path(), &traits(&["Greeter"])).unwrap()
+            });
+        assert_eq!(hits.len(), 1);
+        // With "legacy" active → predicate false → no finding.
+        let active: BTreeSet<String> = std::iter::once("legacy".to_string()).collect();
+        let hits = crate::cfg::with_features(crate::cfg::FeatureSet::Exact(active), || {
+            find_derive_impls(dir.path(), &traits(&["Greeter"])).unwrap()
+        });
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn cfg_attr_composes_with_plain_derives_on_same_item() {
+        let dir = setup(&[(
+            "src/lib.rs",
+            r#"#[derive(Debug)]
+               #[cfg_attr(feature = "serde", derive(Greeter))]
+               struct Foo;"#,
+        )]);
+        let hits = find_derive_impls(dir.path(), &traits(&["Debug", "Greeter"])).unwrap();
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn malformed_cfg_attr_is_ignored_without_panicking() {
+        let dir = setup(&[(
+            "src/lib.rs",
+            r#"#[cfg_attr()]
+               struct Bar;
+               #[cfg_attr(feature = "serde", derive(Greeter))]
+               struct Baz;"#,
+        )]);
+        let hits = find_derive_impls(dir.path(), &traits(&["Greeter"])).unwrap();
+        assert_eq!(
+            payloads(&hits),
+            vec![("Greeter".to_string(), "Baz".to_string())]
+        );
     }
 
     #[test]

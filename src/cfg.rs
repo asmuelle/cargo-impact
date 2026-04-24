@@ -143,6 +143,22 @@ pub fn cfg_matches(attr: &Attribute, features: &FeatureSet) -> bool {
     }
 }
 
+/// Read the currently-active feature set from the thread-local. Used
+/// by analyzers that need to evaluate `#[cfg_attr(...)]` predicates
+/// (which `parse_and_filter` deliberately doesn't touch — it filters
+/// items, not attributes).
+pub(crate) fn current_features() -> FeatureSet {
+    ACTIVE.with(|cell| cell.borrow().clone())
+}
+
+/// Evaluate a cfg-style predicate Meta (e.g., the first argument of
+/// `#[cfg_attr(predicate, ...)]`) against a feature set. Public to
+/// `crate` so `derive.rs` can handle conditional derives without
+/// duplicating the eval logic.
+pub(crate) fn eval_cfg_meta(meta: &Meta, features: &FeatureSet) -> bool {
+    eval_meta(meta, features)
+}
+
 fn eval_meta(meta: &Meta, features: &FeatureSet) -> bool {
     match meta {
         // Bare identifiers: cfg(test), cfg(debug_assertions), cfg(miri), ...

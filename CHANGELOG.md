@@ -30,6 +30,16 @@ out explicitly here.
   `--lib`, letting cargo's default target selection pick the bin.
   Previously bin-only crates (CLIs, services) got zero expansion
   findings.
+- **`cfg_attr(..., derive(...))` recognition in `derive.rs`.** The
+  first honest caveat in `CLAUDE.md` — conditional derives were
+  invisible — is closed. The predicate is evaluated against the
+  active feature set (`FeatureSet::Permissive` treats every cfg_attr
+  as active, per the project-wide over-report stance;
+  `FeatureSet::Exact` evaluates precisely). `cfg::eval_cfg_meta` and
+  `cfg::current_features` added as `pub(crate)` so `derive.rs` can
+  reuse the existing cfg predicate evaluator without duplicating it.
+  Stacked `cfg_attr(a, cfg_attr(b, derive(C)))` remains unsupported
+  (rare and requires a Meta→Attribute synthesizer).
 
 ### Added
 
