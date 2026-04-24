@@ -170,6 +170,7 @@ mod tests {
             no_default_features: false,
             budget: 0,
             context: false,
+            feature_powerset: false,
         }
     }
 

@@ -316,6 +316,76 @@ fn mcp_version_tool_responds_to_tools_call_over_stdio() {
 }
 
 #[test]
+fn feature_powerset_surfaces_findings_hidden_under_default_features() {
+    // Fixture: a trait and two impls — one visible at defaults, the
+    // other gated behind `feature = "extra"`. Changing the trait should
+    // surface BOTH impls under --feature-powerset (because --all-features
+    // activates "extra"), even though the baseline-feature view only
+    // sees the unconditional impl.
+    let cargo_toml = "[package]\nname=\"fixture\"\nversion=\"0.1.0\"\nedition=\"2021\"\n\
+         [features]\ndefault = []\nextra = []\n\
+         [lib]\npath=\"src/lib.rs\"\n";
+    let initial_src = "pub trait Greeter { fn hi(&self) -> u32; }\n\
+         pub struct Always;\n\
+         impl Greeter for Always { fn hi(&self) -> u32 { 1 } }\n\
+         #[cfg(feature = \"extra\")]\n\
+         pub struct Gated;\n\
+         #[cfg(feature = \"extra\")]\n\
+         impl Greeter for Gated { fn hi(&self) -> u32 { 2 } }\n";
+    let changed_src = "pub trait Greeter { fn hi(&self) -> String; }\n\
+         pub struct Always;\n\
+         impl Greeter for Always { fn hi(&self) -> String { String::new() } }\n\
+         #[cfg(feature = \"extra\")]\n\
+         pub struct Gated;\n\
+         #[cfg(feature = \"extra\")]\n\
+         impl Greeter for Gated { fn hi(&self) -> String { String::new() } }\n";
+    let dir = seed_repo(
+        &[("Cargo.toml", cargo_toml), ("src/lib.rs", initial_src)],
+        &[("src/lib.rs", changed_src)],
+    );
+
+    // Baseline run (default features only; `extra` is off).
+    let (baseline_out, baseline_code) = run_impact(dir.path(), &["--format", "json"]);
+    assert_eq!(baseline_code, 0, "baseline should exit 0: {baseline_out}");
+    let baseline: Value = serde_json::from_str(&baseline_out).expect("parse baseline json");
+    let baseline_evidence: Vec<String> = baseline["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["evidence"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        !baseline_evidence.iter().any(|e| e.contains("Gated")),
+        "baseline view must NOT mention `Gated` — it's behind a feature gate. Got: {baseline_evidence:?}"
+    );
+
+    // Powerset run: --all-features activates `extra`, so the gated
+    // impl becomes visible and should surface with the annotation.
+    let (powerset_out, powerset_code) =
+        run_impact(dir.path(), &["--format", "json", "--feature-powerset"]);
+    assert_eq!(powerset_code, 0, "powerset should exit 0: {powerset_out}");
+    let powerset: Value = serde_json::from_str(&powerset_out).expect("parse powerset json");
+    let powerset_evidence: Vec<String> = powerset["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["evidence"].as_str().map(str::to_string))
+        .collect();
+    let gated_hit = powerset_evidence
+        .iter()
+        .find(|e| e.contains("Gated"))
+        .unwrap_or_else(|| {
+            panic!(
+                "powerset view must surface the `Gated` impl. Got evidence: {powerset_evidence:?}"
+            )
+        });
+    assert!(
+        gated_hit.contains("--all-features"),
+        "feature-revealed finding must be annotated with the set that revealed it. Got: {gated_hit}"
+    );
+}
+
+#[test]
 fn mcp_impact_analyze_streams_progress_notifications_before_result() {
     // When a client calls `tools/call impact_analyze`, the server must
     // emit one or more `notifications/message` events describing stage

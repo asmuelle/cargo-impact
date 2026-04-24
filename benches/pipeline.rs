@@ -150,6 +150,7 @@ fn bench_analyze_clean(c: &mut Criterion) {
                 no_default_features: false,
                 budget: 0,
                 context: false,
+                feature_powerset: false,
             };
             let report = cargo_impact::analyze(&args).unwrap();
             black_box(report);
@@ -207,6 +208,7 @@ fn bench_analyze_with_changes(c: &mut Criterion) {
                 no_default_features: false,
                 budget: 0,
                 context: false,
+                feature_powerset: false,
             };
             let report = cargo_impact::analyze(&args).unwrap();
             assert!(

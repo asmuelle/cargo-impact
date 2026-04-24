@@ -240,6 +240,13 @@ fn input_schema_analyze() -> Value {
                                 the tool's output is markdown or text; JSON callers \
                                 can filter themselves. Roughly ¼ token per char for \
                                 mainstream tokenizers."
+            },
+            "feature_powerset": {
+                "type": "boolean",
+                "description": "Run the analyzer across baseline + \
+                                --no-default-features + --all-features and \
+                                annotate findings revealed only under non-baseline \
+                                sets. CI-oriented; roughly triples run time."
             }
         }
     })
@@ -268,6 +275,8 @@ struct AnalyzeArgs {
     manifest_dir: Option<String>,
     #[serde(default)]
     budget: Option<usize>,
+    #[serde(default)]
+    feature_powerset: Option<bool>,
 }
 
 impl AnalyzeArgs {
@@ -288,6 +297,7 @@ impl AnalyzeArgs {
             // MCP callers always want the structured report, never the
             // bare file-list. --context is a CLI-only output mode.
             context: false,
+            feature_powerset: self.feature_powerset.unwrap_or(false),
         }
     }
 }

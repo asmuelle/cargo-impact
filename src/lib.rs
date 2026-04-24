@@ -175,6 +175,19 @@ pub struct ImpactArgs {
     /// `--no-default-features`.
     #[arg(long)]
     pub no_default_features: bool,
+
+    /// Run analysis across a depth-1 feature powerset (baseline +
+    /// `--no-default-features` + `--all-features`) and surface
+    /// findings that the baseline view missed. Intended for CI —
+    /// triples analyzer cost so off by default. Findings visible
+    /// only under a non-baseline set are annotated in evidence
+    /// with the feature set that revealed them. A full feature
+    /// powerset (O(2^N) over N features) is out of scope; the
+    /// depth-1 view catches the usual feature-gated blast radius
+    /// (std/no_std, sync/async, feature = "foo" paths) without
+    /// combinatorial blow-up.
+    #[arg(long)]
+    pub feature_powerset: bool,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -283,13 +296,100 @@ where
     // block. `cfg::parse_and_filter` — used by every analyzer in place of
     // `syn::parse_file` — reads the thread-local to strip items whose cfg
     // gates don't match.
-    let features = cfg::resolve_features(
+    let baseline_features = cfg::resolve_features(
         &root,
         &args.features,
         args.no_default_features,
         args.all_features,
     )?;
-    cfg::with_features(features, || analyze_inner(args, &root, &mut progress))
+    let baseline = cfg::with_features(baseline_features, || {
+        analyze_inner(args, &root, &mut progress)
+    })?;
+
+    if !args.feature_powerset {
+        return Ok(baseline);
+    }
+
+    // Depth-1 powerset: baseline + no-default-features + all-features.
+    // Each is a separate analyzer run (git diff, symbol extraction,
+    // all analyzer passes) under a different cfg view; combined cost
+    // is roughly 3x a normal run, which is why this is flagged off by
+    // default and documented as CI-only.
+    progress(&ProgressEvent {
+        stage: "powerset_no_default",
+        current: 1,
+        total: 3,
+        detail: None,
+    });
+    let nodef_features = cfg::resolve_features(&root, &[], true, false)?;
+    let nodef_report =
+        cfg::with_features(nodef_features, || analyze_inner(args, &root, &mut progress))?;
+
+    progress(&ProgressEvent {
+        stage: "powerset_all_features",
+        current: 2,
+        total: 3,
+        detail: None,
+    });
+    let all_features_set = cfg::resolve_features(&root, &[], false, true)?;
+    let all_report = cfg::with_features(all_features_set, || {
+        analyze_inner(args, &root, &mut progress)
+    })?;
+
+    Ok(merge_powerset_reports(baseline, nodef_report, all_report))
+}
+
+/// Combine three analyzer reports (baseline, no-default-features,
+/// all-features) into one. The baseline's findings are kept verbatim;
+/// findings that appear in one of the other passes but NOT in the
+/// baseline are appended with an evidence suffix identifying the
+/// feature set that revealed them. Dedup is by finding ID (content-
+/// hashed, so identical findings across passes carry identical IDs).
+///
+/// A finding that appears only under `--no-default-features` indicates
+/// a code path that your baseline analysis misses — typically a
+/// `#[cfg(not(feature = "std"))]` branch or a fallback path. A finding
+/// that appears only under `--all-features` means some optional feature
+/// introduces blast radius the default view doesn't see. Both are the
+/// signal a CI-gated powerset run is supposed to catch.
+fn merge_powerset_reports(
+    baseline: AnalysisReport,
+    nodef: AnalysisReport,
+    all: AnalysisReport,
+) -> AnalysisReport {
+    use std::collections::BTreeSet;
+
+    let baseline_ids: BTreeSet<String> = baseline.findings.iter().map(|f| f.id.clone()).collect();
+    let mut combined = baseline.findings;
+    let mut added_ids = baseline_ids.clone();
+
+    for (extra_report, label) in [(nodef, "--no-default-features"), (all, "--all-features")] {
+        for mut f in extra_report.findings {
+            if added_ids.contains(&f.id) {
+                continue;
+            }
+            f.evidence = format!("{} (only visible with {label})", f.evidence);
+            added_ids.insert(f.id.clone());
+            combined.push(f);
+        }
+    }
+
+    // Re-sort so feature-revealed findings interleave by severity with
+    // baseline findings rather than always landing at the bottom.
+    combined.sort_by(|a, b| {
+        a.severity
+            .cmp(&b.severity)
+            .then_with(|| b.tier.rank().cmp(&a.tier.rank()))
+            .then_with(|| a.kind.tag().cmp(b.kind.tag()))
+            .then_with(|| a.evidence.cmp(&b.evidence))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    AnalysisReport {
+        changed_files: baseline.changed_files,
+        candidate_symbols: baseline.candidate_symbols,
+        findings: combined,
+    }
 }
 
 fn analyze_inner<F>(
@@ -570,5 +670,158 @@ mod tests {
         assert!(FailOn::Low.triggers(SeverityClass::Medium));
         assert!(FailOn::Low.triggers(SeverityClass::Low));
         assert!(!FailOn::Low.triggers(SeverityClass::Unknown));
+    }
+
+    mod powerset {
+        use super::*;
+        use crate::finding::Location;
+
+        fn mk_finding(id: &str, evidence: &str) -> Finding {
+            let mut f = Finding::new(
+                "",
+                Tier::Likely,
+                0.85,
+                FindingKind::TestReference {
+                    test: Location {
+                        file: PathBuf::from("tests/a.rs"),
+                        symbol: format!("test_{id}"),
+                    },
+                    matched_symbols: vec![id.to_string()],
+                },
+                evidence,
+            );
+            f.id = id.to_string();
+            f
+        }
+
+        fn report(findings: Vec<Finding>) -> AnalysisReport {
+            AnalysisReport {
+                changed_files: Vec::new(),
+                candidate_symbols: Vec::new(),
+                findings,
+            }
+        }
+
+        #[test]
+        fn baseline_findings_pass_through_unchanged() {
+            let baseline = report(vec![mk_finding("a", "base evidence")]);
+            let nodef = report(vec![]);
+            let all = report(vec![]);
+            let merged = merge_powerset_reports(baseline, nodef, all);
+            assert_eq!(merged.findings.len(), 1);
+            assert_eq!(merged.findings[0].evidence, "base evidence");
+        }
+
+        #[test]
+        fn finding_only_in_nodef_is_annotated_and_appended() {
+            let baseline = report(vec![mk_finding("a", "base")]);
+            let nodef = report(vec![mk_finding("b", "from-nodef")]);
+            let all = report(vec![]);
+            let merged = merge_powerset_reports(baseline, nodef, all);
+            assert_eq!(merged.findings.len(), 2);
+            let b = merged.findings.iter().find(|f| f.id == "b").unwrap();
+            assert!(
+                b.evidence.contains("--no-default-features"),
+                "expected no-default annotation in evidence: {}",
+                b.evidence
+            );
+            assert!(b.evidence.starts_with("from-nodef"));
+        }
+
+        #[test]
+        fn finding_only_in_all_features_is_annotated_and_appended() {
+            let baseline = report(vec![]);
+            let nodef = report(vec![]);
+            let all = report(vec![mk_finding("c", "from-all")]);
+            let merged = merge_powerset_reports(baseline, nodef, all);
+            assert_eq!(merged.findings.len(), 1);
+            let c = &merged.findings[0];
+            assert!(c.evidence.contains("--all-features"));
+            assert!(c.evidence.starts_with("from-all"));
+        }
+
+        #[test]
+        fn finding_visible_in_baseline_and_nodef_keeps_baseline_evidence() {
+            // Same ID in baseline and nodef — baseline wins, no
+            // annotation. The ID dedup prevents double-counting.
+            let shared = mk_finding("dup", "baseline-text");
+            let also_shared = mk_finding("dup", "nodef-text");
+            let baseline = report(vec![shared]);
+            let nodef = report(vec![also_shared]);
+            let merged = merge_powerset_reports(baseline, nodef, report(vec![]));
+            assert_eq!(merged.findings.len(), 1);
+            assert_eq!(merged.findings[0].evidence, "baseline-text");
+        }
+
+        #[test]
+        fn same_id_in_both_extras_only_annotates_once() {
+            // A finding absent from baseline, present in both extras,
+            // gets appended exactly once — with whichever annotation
+            // the first-encountered extra (nodef) supplied.
+            let baseline = report(vec![]);
+            let nodef = report(vec![mk_finding("x", "ev")]);
+            let all = report(vec![mk_finding("x", "ev")]);
+            let merged = merge_powerset_reports(baseline, nodef, all);
+            assert_eq!(merged.findings.len(), 1);
+            assert!(
+                merged.findings[0]
+                    .evidence
+                    .contains("--no-default-features")
+            );
+            assert!(!merged.findings[0].evidence.contains("--all-features"));
+        }
+
+        #[test]
+        fn merged_results_stay_sorted_by_severity_then_tier() {
+            // High+Likely < Medium+Likely < Low+Likely in our sort
+            // (severity ascending, then tier desc by rank). Feed them
+            // in reverse order across the three reports and verify
+            // the output ordering.
+            let high = {
+                let mut f = Finding::new(
+                    "",
+                    Tier::Likely,
+                    0.9,
+                    FindingKind::BuildScriptChanged {
+                        file: PathBuf::from("build.rs"),
+                    },
+                    "build.rs changed",
+                );
+                f.id = "high".into();
+                f
+            };
+            let med = mk_finding("med", "medium finding");
+            let low = {
+                let mut f = Finding::new(
+                    "",
+                    Tier::Likely,
+                    0.4,
+                    FindingKind::DocDriftKeyword {
+                        symbol: "foo".into(),
+                        doc: Location {
+                            file: PathBuf::from("README.md"),
+                            symbol: "foo".into(),
+                        },
+                        line: 1,
+                    },
+                    "doc drift",
+                );
+                f.id = "low".into();
+                f
+            };
+            let baseline = report(vec![low]);
+            let nodef = report(vec![med]);
+            let all = report(vec![high]);
+            let merged = merge_powerset_reports(baseline, nodef, all);
+            let severities: Vec<_> = merged.findings.iter().map(|f| f.severity).collect();
+            assert_eq!(
+                severities,
+                vec![
+                    SeverityClass::High,
+                    SeverityClass::Medium,
+                    SeverityClass::Low
+                ]
+            );
+        }
     }
 }
