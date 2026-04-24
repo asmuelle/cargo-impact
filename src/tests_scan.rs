@@ -226,6 +226,45 @@ mod tests {
     }
 
     #[test]
+    fn traverses_multi_crate_workspace_members() {
+        // Standard `[workspace] members = ["crate-a", "crate-b"]` layout: both
+        // members live under the root and `walkdir` visits them transparently.
+        // Non-standard path-outside-root members are out of scope; cover that
+        // only when a real user hits it.
+        let dir = setup(&[
+            (
+                "crate-a/src/lib.rs",
+                "#[test] fn test_a() { let _ = login(); }",
+            ),
+            (
+                "crate-b/tests/integration.rs",
+                "#[test] fn test_b() { let _ = login(); }",
+            ),
+            (
+                "crate-c/nested/deep/src/thing.rs",
+                "#[test] fn test_c() { let _ = login(); }",
+            ),
+        ]);
+        let hits = find_affected_tests(dir.path(), &symbols(&["login"])).unwrap();
+        let mut names: Vec<_> = hits
+            .iter()
+            .map(|h| match &h.kind {
+                FindingKind::TestReference { test, .. } => test.symbol.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "test_a".to_string(),
+                "test_b".to_string(),
+                "test_c".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn skips_target_and_hidden_directories() {
         let dir = setup(&[
             (
