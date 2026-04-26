@@ -13,11 +13,10 @@
 //! best-effort enhancement, never a hard requirement.
 
 use crate::symbols::SymbolKind;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use quote::ToTokens;
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Command;
 use syn::{File, Item};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,17 +39,19 @@ pub struct ChangedItem {
 /// to blanket analysis; returns `Ok(Some(items))` on success.
 pub fn diff_file(root: &Path, rel_file: &Path, since: &str) -> Result<Option<Vec<ChangedItem>>> {
     let wt_path = root.join(rel_file);
-    let wt_src = match std::fs::read_to_string(&wt_path) {
-        Ok(s) => s,
-        Err(_) => return Ok(None),
-    };
+    let wt_src = std::fs::read_to_string(&wt_path).ok();
 
-    let head_src = match git_show(root, since, rel_file)? {
+    let head_src = match crate::git::show_file_at(root, since, rel_file)? {
         Some(s) => s,
         None => {
             // File did not exist at `since` — everything in the WT is new.
-            return Ok(Some(all_as(&wt_src, ItemChange::Added)));
+            return Ok(wt_src.map(|src| all_as(&src, ItemChange::Added)));
         }
+    };
+
+    let Some(wt_src) = wt_src else {
+        // File existed at `since` but no longer exists in the working tree.
+        return Ok(Some(all_as(&head_src, ItemChange::Removed)));
     };
 
     let Some(head_ast) = crate::cfg::parse_and_filter(&head_src) else {
@@ -63,52 +64,29 @@ pub fn diff_file(root: &Path, rel_file: &Path, since: &str) -> Result<Option<Vec
     Ok(Some(compare(&head_ast, &wt_ast)))
 }
 
-/// `git show {rev}:{path}` — returns `Ok(None)` when the path didn't exist at
-/// that revision. Any other git failure is a hard error so the orchestrator
-/// can decide whether to fall back.
-fn git_show(root: &Path, rev: &str, rel: &Path) -> Result<Option<String>> {
-    // Normalize to forward slashes so git can find the pathspec on Windows.
-    let spec = format!("{rev}:{}", rel.to_string_lossy().replace('\\', "/"));
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .arg("show")
-        .arg(&spec)
-        .output()
-        .with_context(|| format!("git show {spec}"))?;
-    if output.status.success() {
-        Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()))
-    } else {
-        // "does not exist" / "unknown revision" / "exists on disk, but not in …".
-        // Treat all of these as "not present in the base revision" and let the
-        // caller fall back to added-as-new.
-        Ok(None)
-    }
-}
-
 fn all_as(src: &str, change: ItemChange) -> Vec<ChangedItem> {
     let Some(ast) = crate::cfg::parse_and_filter(src) else {
         return Vec::new();
     };
-    items_by_name(&ast)
+    items_by_qualified_name(&ast)
         .into_iter()
-        .map(|(name, (kind, _))| ChangedItem { name, kind, change })
+        .map(|(_, (name, kind, _))| ChangedItem { name, kind, change })
         .collect()
 }
 
 fn compare(head: &File, wt: &File) -> Vec<ChangedItem> {
-    let head_items = items_by_name(head);
-    let wt_items = items_by_name(wt);
+    let head_items = items_by_qualified_name(head);
+    let wt_items = items_by_qualified_name(wt);
 
     let mut out = Vec::new();
-    for (name, (kind, tokens)) in &wt_items {
-        match head_items.get(name) {
+    for (key, (name, kind, tokens)) in &wt_items {
+        match head_items.get(key) {
             None => out.push(ChangedItem {
                 name: name.clone(),
                 kind: *kind,
                 change: ItemChange::Added,
             }),
-            Some((_, head_tokens)) if head_tokens != tokens => out.push(ChangedItem {
+            Some((_, _, head_tokens)) if head_tokens != tokens => out.push(ChangedItem {
                 name: name.clone(),
                 kind: *kind,
                 change: ItemChange::Modified,
@@ -116,8 +94,8 @@ fn compare(head: &File, wt: &File) -> Vec<ChangedItem> {
             _ => {}
         }
     }
-    for (name, (kind, _)) in &head_items {
-        if !wt_items.contains_key(name) {
+    for (key, (name, kind, _)) in &head_items {
+        if !wt_items.contains_key(key) {
             out.push(ChangedItem {
                 name: name.clone(),
                 kind: *kind,
@@ -129,17 +107,22 @@ fn compare(head: &File, wt: &File) -> Vec<ChangedItem> {
     out
 }
 
-/// Build a name → (kind, token-stream) map for a parsed file. Anonymous items
-/// (impls, use statements, extern blocks, macros) are excluded — diff tracking
-/// is name-based and they have no single name to key on. FFI extern "C"
-/// signature changes are caught by the dedicated `ffi` module instead.
-fn items_by_name(ast: &File) -> BTreeMap<String, (SymbolKind, String)> {
+/// Build a qualified-name → (bare name, kind, token-stream) map for a parsed
+/// file. Anonymous items (impls, use statements, extern blocks, macros) are
+/// excluded — diff tracking is item-based and they have no single name to key
+/// on. FFI extern "C" signature changes are caught by the dedicated `ffi`
+/// module instead.
+fn items_by_qualified_name(ast: &File) -> BTreeMap<String, (String, SymbolKind, String)> {
     let mut out = BTreeMap::new();
-    collect(&ast.items, &mut out);
+    collect(&ast.items, &mut Vec::new(), &mut out);
     out
 }
 
-fn collect(items: &[Item], out: &mut BTreeMap<String, (SymbolKind, String)>) {
+fn collect(
+    items: &[Item],
+    modules: &mut Vec<String>,
+    out: &mut BTreeMap<String, (String, SymbolKind, String)>,
+) {
     for item in items {
         let entry = match item {
             Item::Fn(f) => Some((f.sig.ident.to_string(), SymbolKind::Fn, item_tokens(item))),
@@ -156,15 +139,26 @@ fn collect(items: &[Item], out: &mut BTreeMap<String, (SymbolKind, String)>) {
             Item::Union(u) => Some((u.ident.to_string(), SymbolKind::Union, item_tokens(item))),
             Item::Mod(m) => {
                 if let Some((_, inner)) = &m.content {
-                    collect(inner, out);
+                    modules.push(m.ident.to_string());
+                    collect(inner, modules, out);
+                    modules.pop();
                 }
                 Some((m.ident.to_string(), SymbolKind::Mod, item_tokens(item)))
             }
             _ => None,
         };
         if let Some((name, kind, tokens)) = entry {
-            out.insert(name, (kind, tokens));
+            let key = qualified_name(modules, &name);
+            out.insert(key, (name, kind, tokens));
         }
+    }
+}
+
+fn qualified_name(modules: &[String], name: &str) -> String {
+    if modules.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}::{name}", modules.join("::"))
     }
 }
 
@@ -258,6 +252,36 @@ mod tests {
         );
         let items = diff_file(dir.path(), &rel, "HEAD").unwrap().unwrap();
         assert_eq!(names(&items), vec![("changed", ItemChange::Modified)]);
+    }
+
+    #[test]
+    fn same_named_items_in_different_modules_do_not_collide() {
+        let (dir, rel) = git_fixture(
+            "mod a { pub trait Greeter { fn hi(&self) -> u32; } }\n\
+             mod b { pub trait Greeter { fn hi(&self) -> u32; } }\n",
+            Some(
+                "mod a { pub trait Greeter { fn hi(&self) -> String; } }\n\
+                 mod b { pub trait Greeter { fn hi(&self) -> u32; } }\n",
+            ),
+        );
+        let items = diff_file(dir.path(), &rel, "HEAD").unwrap().unwrap();
+        assert!(
+            names(&items)
+                .iter()
+                .any(|(name, change)| *name == "Greeter" && *change == ItemChange::Modified),
+            "expected the changed nested trait to survive alongside same-named siblings: {items:?}"
+        );
+    }
+
+    #[test]
+    fn deleted_file_marks_all_previous_items_removed() {
+        let (dir, rel) = git_fixture("fn gone() {}\nstruct Removed;\n", None);
+        fs::remove_file(dir.path().join(&rel)).unwrap();
+
+        let items = diff_file(dir.path(), &rel, "HEAD").unwrap().unwrap();
+        let got = names(&items);
+        assert!(got.contains(&("gone", ItemChange::Removed)));
+        assert!(got.contains(&("Removed", ItemChange::Removed)));
     }
 
     #[test]

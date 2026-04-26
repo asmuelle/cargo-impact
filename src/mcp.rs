@@ -351,15 +351,7 @@ fn call_tool(params: &Value, out: &mut impl Write) -> Result<Value> {
             let args: AnalyzeArgs = serde_json::from_value(arguments)?;
             let impact_args = args.into_impact_args();
             let mut report = analyze(&impact_args)?;
-            report.findings.retain(|f| {
-                matches!(
-                    f.kind.tag(),
-                    "ffi_signature_change"
-                        | "build_script_changed"
-                        | "trait_impl"
-                        | "derived_trait_impl"
-                )
-            });
+            report.findings.retain(is_surface_finding);
             Ok(text_content(&render_json_report(&impact_args, &report)?))
         }
         "impact_semver" => {
@@ -401,6 +393,17 @@ fn render_json_report(args: &ImpactArgs, report: &AnalysisReport) -> Result<Stri
         &report.candidate_symbols,
         &report.findings,
         args.budget,
+    )
+}
+
+fn is_surface_finding(f: &crate::Finding) -> bool {
+    matches!(
+        f.kind.tag(),
+        "ffi_signature_change"
+            | "build_script_changed"
+            | "trait_impl"
+            | "derived_trait_impl"
+            | "runtime_surface"
     )
 }
 
@@ -511,6 +514,25 @@ mod tests {
                 "tools/list missing `{expected}`; got {names:?}"
             );
         }
+    }
+
+    #[test]
+    fn surface_projection_keeps_runtime_surface_findings() {
+        let finding = crate::Finding::new(
+            "",
+            crate::Tier::Likely,
+            0.75,
+            crate::FindingKind::RuntimeSurface {
+                framework: "axum".into(),
+                identifier: "route `/users`".into(),
+                site: crate::Location {
+                    file: std::path::PathBuf::from("src/routes.rs"),
+                    symbol: "route `/users`".into(),
+                },
+            },
+            "axum route references changed symbol",
+        );
+        assert!(is_surface_finding(&finding));
     }
 
     #[test]

@@ -14,16 +14,12 @@ use anyhow::Result;
 use quote::ToTokens;
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Command;
 use syn::{ForeignItem, Item};
 
 pub fn find_ffi_changes(root: &Path, rel_file: &Path, since: &str) -> Result<Vec<Finding>> {
-    let wt = match std::fs::read_to_string(root.join(rel_file)) {
-        Ok(s) => s,
-        Err(_) => return Ok(Vec::new()),
-    };
+    let wt = std::fs::read_to_string(root.join(rel_file)).unwrap_or_default();
     // New file — no HEAD version means every FFI symbol is "added".
-    let head: String = git_show(root, since, rel_file)?.unwrap_or_default();
+    let head: String = crate::git::show_file_at(root, since, rel_file)?.unwrap_or_default();
 
     let Some(wt_ast) = crate::cfg::parse_and_filter(&wt) else {
         return Ok(Vec::new());
@@ -103,21 +99,6 @@ fn ffi_signatures(ast: &syn::File) -> BTreeMap<String, String> {
         }
     }
     out
-}
-
-fn git_show(root: &Path, rev: &str, rel: &Path) -> Result<Option<String>> {
-    let spec = format!("{rev}:{}", rel.to_string_lossy().replace('\\', "/"));
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .arg("show")
-        .arg(&spec)
-        .output()?;
-    if output.status.success() {
-        Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()))
-    } else {
-        Ok(None)
-    }
 }
 
 #[cfg(test)]
@@ -232,6 +213,22 @@ mod tests {
             })
             .collect();
         assert_eq!(payloads, vec![("gone".to_string(), "removed")]);
+    }
+
+    #[test]
+    fn detects_removed_extern_c_symbol_when_file_is_deleted() {
+        let (dir, rel) = git_fixture("extern \"C\" { fn gone(); }\n", None);
+        fs::remove_file(dir.path().join(&rel)).unwrap();
+
+        let hits = find_ffi_changes(dir.path(), &rel, "HEAD").unwrap();
+        assert_eq!(hits.len(), 1);
+        match &hits[0].kind {
+            FindingKind::FfiSignatureChange { symbol, change, .. } => {
+                assert_eq!(symbol, "gone");
+                assert_eq!(*change, "removed");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]

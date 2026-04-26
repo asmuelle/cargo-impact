@@ -284,6 +284,14 @@ pub fn resolve_features(
 
     let parsed: toml::Value = toml::from_str(&src).context("parsing Cargo.toml")?;
     let features_table = parsed.get("features").and_then(|v| v.as_table());
+    let is_virtual_workspace = parsed.get("workspace").is_some() && parsed.get("package").is_none();
+    if is_virtual_workspace && features_table.is_none() && user_features.is_empty() {
+        // A virtual workspace manifest has no crate-local feature table. Using
+        // `Exact(empty)` here strips every member item behind its default
+        // features and creates false negatives. Until feature evaluation is
+        // package-scoped, keep the conservative v0.1 behavior for this shape.
+        return Ok(FeatureSet::Permissive);
+    }
 
     if all_features {
         let mut active = BTreeSet::new();
@@ -598,6 +606,17 @@ mod tests {
     #[test]
     fn missing_manifest_falls_back_to_permissive() {
         let dir = TempDir::new().unwrap();
+        let f = resolve_features(dir.path(), &[], false, false).unwrap();
+        assert!(f.is_permissive());
+    }
+
+    #[test]
+    fn virtual_workspace_without_root_features_falls_back_to_permissive() {
+        let dir = write_manifest(
+            "\
+            [workspace]\n\
+            members = [\"member\"]\n",
+        );
         let f = resolve_features(dir.path(), &[], false, false).unwrap();
         assert!(f.is_permissive());
     }

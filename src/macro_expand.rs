@@ -54,11 +54,13 @@
 
 use crate::finding::{Finding, FindingKind, Location, Tier};
 use crate::tests_scan::{is_test_fn, tokens_contain_ident};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use quote::ToTokens;
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::thread::JoinHandle;
 use std::time::Duration;
 use syn::visit::Visit;
 use syn::{ItemFn, ItemImpl, Path as SynPath, Type, TypePath};
@@ -246,22 +248,37 @@ fn spawn_cargo_expand(root: &Path, extra_args: &[&str]) -> Result<String> {
         .stderr(Stdio::piped());
 
     let mut child = cmd.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("cargo expand child missing stdout pipe")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("cargo expand child missing stderr pipe")?;
+    let stdout_reader = read_pipe(stdout);
+    let stderr_reader = read_pipe(stderr);
     let start = std::time::Instant::now();
 
     // Poll with a wall-clock budget. Can't use `wait_timeout` without
-    // pulling a new dep; the poll loop keeps us std-only.
+    // pulling a new dep; the poll loop keeps us std-only. The stdout/stderr
+    // reader threads are required: cargo-expand output can exceed the OS pipe
+    // buffer, and waiting for process exit before reading would deadlock.
     loop {
         if let Some(status) = child.try_wait()? {
-            let out = child.wait_with_output()?;
+            let stdout = join_pipe(stdout_reader)?;
+            let stderr = join_pipe(stderr_reader)?;
             if !status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stderr = String::from_utf8_lossy(&stderr);
                 anyhow::bail!("cargo expand exited with status {status:?}; stderr:\n{stderr}");
             }
-            return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+            return Ok(String::from_utf8_lossy(&stdout).into_owned());
         }
         if start.elapsed() > MACRO_EXPAND_TIMEOUT {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = join_pipe(stdout_reader);
+            let _ = join_pipe(stderr_reader);
             anyhow::bail!(
                 "cargo expand did not finish within {:?}",
                 MACRO_EXPAND_TIMEOUT
@@ -269,6 +286,24 @@ fn spawn_cargo_expand(root: &Path, extra_args: &[&str]) -> Result<String> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn read_pipe<R>(mut pipe: R) -> JoinHandle<std::io::Result<Vec<u8>>>
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        pipe.read_to_end(&mut buf)?;
+        Ok(buf)
+    })
+}
+
+fn join_pipe(handle: JoinHandle<std::io::Result<Vec<u8>>>) -> Result<Vec<u8>> {
+    handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("cargo expand pipe reader panicked"))?
+        .context("reading cargo expand output")
 }
 
 // ---------------------------------------------------------------------------
@@ -536,6 +571,13 @@ mod tests {
         ));
         assert!(!is_no_library_error("error: could not compile `foo`"));
         assert!(!is_no_library_error(""));
+    }
+
+    #[test]
+    fn pipe_reader_collects_output_without_waiting_for_process_exit() {
+        let handle = read_pipe(std::io::Cursor::new(b"expanded output".to_vec()));
+        let out = join_pipe(handle).unwrap();
+        assert_eq!(out, b"expanded output");
     }
 
     #[test]

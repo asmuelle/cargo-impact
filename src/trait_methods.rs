@@ -15,11 +15,10 @@
 //! that signal would only add noise.
 
 use crate::finding::{Finding, FindingKind, TraitChange};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use quote::ToTokens;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use syn::{ItemTrait, TraitItem};
 
 /// A classified change to a single trait in a single file.
@@ -71,7 +70,7 @@ pub fn classify_changes_in_file(
     let Ok(wt_src) = std::fs::read_to_string(root.join(rel_file)) else {
         return Ok(Vec::new());
     };
-    let head_src = match git_show(root, since, rel_file)? {
+    let head_src = match crate::git::show_file_at(root, since, rel_file)? {
         Some(s) => s,
         None => return Ok(Vec::new()),
     };
@@ -231,22 +230,6 @@ fn methods_map(t: &ItemTrait) -> BTreeMap<String, MethodEntry> {
         }
     }
     out
-}
-
-fn git_show(root: &Path, rev: &str, rel: &Path) -> Result<Option<String>> {
-    let spec = format!("{rev}:{}", rel.to_string_lossy().replace('\\', "/"));
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .arg("show")
-        .arg(&spec)
-        .output()
-        .with_context(|| format!("git show {spec}"))?;
-    if output.status.success() {
-        Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()))
-    } else {
-        Ok(None)
-    }
 }
 
 #[cfg(test)]

@@ -135,7 +135,7 @@ pub fn run(
             break;
         }
         let abs = root.join(rel);
-        match collect_references_for_file(&mut client, &abs, rel, changed_symbols, deadline) {
+        match collect_references_for_file(&mut client, root, &abs, rel, changed_symbols, deadline) {
             Ok(hits) => findings.extend(hits),
             Err(e) => eprintln!(
                 "cargo-impact: rust-analyzer query failed for {}: {e:#}; skipping file",
@@ -153,6 +153,7 @@ pub fn run(
 /// `textDocument/references` for each.
 fn collect_references_for_file(
     client: &mut LspClient,
+    root: &Path,
     abs: &Path,
     rel: &Path,
     changed_symbols: &BTreeSet<String>,
@@ -169,7 +170,7 @@ fn collect_references_for_file(
         }
         let refs = client.references(abs, sym.line, sym.character, deadline)?;
         for loc in refs {
-            let target_file = uri_to_relative_path(&loc.uri, abs.parent().unwrap_or(abs));
+            let target_file = uri_to_relative_path(&loc.uri, root);
             // Classify the reference's enclosing context (test fn,
             // impl block, plain caller) to refine severity. The file
             // we classify is the *referencing* file — that's where
@@ -179,10 +180,10 @@ fn collect_references_for_file(
             // fall back to Caller on a missing-file read.
             let referencing_abs = uri_to_absolute_path(&loc.uri).unwrap_or_else(|| {
                 // Fallback: if we can't extract an abs path from the
-                // URI, attempt the join-with-base heuristic. Happens
+                // URI, attempt the join-with-root heuristic. Happens
                 // for URIs pointing into external crate sources under
                 // weird schemes.
-                abs.parent().unwrap_or(abs).join(&target_file)
+                root.join(&target_file)
             });
             let context = ref_context::classify(&referencing_abs, loc.line + 1);
             let finding = Finding::new(
@@ -728,6 +729,12 @@ mod tests {
     fn uri_to_relative_path_strips_base_unix_shape() {
         let rel = uri_to_relative_path("file:///tmp/x/src/lib.rs", Path::new("/tmp/x"));
         assert_eq!(rel.to_string_lossy(), "src/lib.rs");
+    }
+
+    #[test]
+    fn uri_to_relative_path_uses_workspace_root_for_sibling_files() {
+        let rel = uri_to_relative_path("file:///tmp/x/tests/smoke.rs", Path::new("/tmp/x"));
+        assert_eq!(rel.to_string_lossy(), "tests/smoke.rs");
     }
 
     #[test]
