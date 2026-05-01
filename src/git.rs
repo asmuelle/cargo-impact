@@ -3,17 +3,22 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Return the set of changed Rust source files, including committed changes
-/// relative to `since` plus all staged and unstaged modifications.
+/// relative to `since` plus all staged, unstaged, and untracked files.
 pub fn changed_rust_files(root: &Path, since: &str) -> Result<Vec<PathBuf>> {
     let prefix = git_prefix(root)?;
     let committed = git_name_only(root, &["diff", "--name-only", since])?;
     let staged = git_name_only(root, &["diff", "--name-only", "--cached"])?;
     let unstaged = git_name_only(root, &["diff", "--name-only"])?;
+    let untracked = git_name_only(
+        root,
+        &["ls-files", "--others", "--exclude-standard", "--full-name"],
+    )?;
 
     let mut files: Vec<PathBuf> = committed
         .into_iter()
         .chain(staged)
         .chain(unstaged)
+        .chain(untracked)
         .filter_map(|rel| worktree_to_root_relative(&rel, &prefix))
         .collect();
     files.sort();
@@ -149,6 +154,34 @@ mod tests {
 
         let files = changed_rust_files(dir.path(), "HEAD").unwrap();
         assert_eq!(files, vec![PathBuf::from("lib.rs")]);
+    }
+
+    #[test]
+    fn untracked_rust_files_are_kept() {
+        let dir = repo();
+        fs::write(dir.path().join("lib.rs"), "pub fn f() {}\n").unwrap();
+        git(dir.path(), &["add", "-A"]);
+        git(dir.path(), &["commit", "-q", "-m", "init"]);
+
+        fs::write(dir.path().join("new.rs"), "pub fn new() {}\n").unwrap();
+
+        let files = changed_rust_files(dir.path(), "HEAD").unwrap();
+        assert_eq!(files, vec![PathBuf::from("new.rs")]);
+    }
+
+    #[test]
+    fn member_root_untracked_paths_are_returned_relative_to_member() {
+        let dir = repo();
+        let member = dir.path().join("member");
+        fs::create_dir_all(member.join("src")).unwrap();
+        fs::write(member.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+        git(dir.path(), &["add", "-A"]);
+        git(dir.path(), &["commit", "-q", "-m", "init"]);
+
+        fs::write(member.join("src/new.rs"), "pub fn new() {}\n").unwrap();
+
+        let files = changed_rust_files(&member, "HEAD").unwrap();
+        assert_eq!(files, vec![PathBuf::from("src/new.rs")]);
     }
 
     #[test]

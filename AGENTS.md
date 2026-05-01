@@ -9,7 +9,7 @@ by Codex; readable by other agents that respect this convention.
 surfaces need re-verifying after *this* diff?". It reads a git diff,
 classifies changed items, walks the workspace for references / impls /
 framework surfaces / doc drift / FFI boundaries, and emits a
-confidence-tiered finding list. v0.3.0 stable, on crates.io.
+confidence-tiered finding list. v0.4.0 stable, on crates.io.
 
 ## Use the MCP tools before raw CLI parsing
 
@@ -18,8 +18,9 @@ session. Prefer them over shelling to Bash:
 
 - **`impact_analyze`** — full blast-radius report (JSON). Takes the
   same args as the CLI (`since`, `features`, `confidence_min`,
-  `semver_checks`, `rust_analyzer`, `budget`). Returns the structured
-  envelope documented in README §8.
+  `all_features`, `no_default_features`, `semver_checks`,
+  `rust_analyzer`, `feature_powerset`, `macro_expand`, `budget`).
+  Returns the structured envelope documented in README §8.
 - **`impact_test_filter`** — returns a `cargo-nextest` filter
   expression you can paste into a nextest invocation.
 - **`impact_surface`** — projects a report to runtime-surface findings
@@ -49,7 +50,7 @@ cargo +1.95 clippy --all-targets --all-features --locked -- -D warnings
 cargo +1.95 test --all-features --locked
 ```
 
-The test total is **163** (155 lib + 7 integration + 1 doctest).
+The test total is **261** (248 lib + 12 integration + 1 doctest).
 Any added code should add tests; any green-to-green diff should keep
 that total accurate in the commit message.
 
@@ -83,11 +84,11 @@ changes.
 
 Worth surfacing when users ask "why didn't cargo-impact flag X?":
 
-- `cfg_attr(feature = "x", derive(…))` is invisible to our analyzer;
-  over-counts slightly when users conditionally derive.
-- Macro expansion is partial: derives are recognized (`src/derive.rs`),
-  attribute/fn-like macros aren't. Full `cargo expand` integration is
-  a v0.4+ item.
+- Stacked `cfg_attr(a, cfg_attr(b, derive(...)))` remains unsupported;
+  single-level `cfg_attr(..., derive(...))` is recognized.
+- Macro expansion is opt-in via `--macro-expand`; expansion-backed
+  findings use the `<expanded>` sentinel instead of source-mapped
+  locations.
 - `log-miss` records stay on disk only (`target/ai-tools-cache/`);
   we never phone home.
 

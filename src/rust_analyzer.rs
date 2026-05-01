@@ -54,6 +54,8 @@ use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const TOOL_BIN: &str = "rust-analyzer";
@@ -247,7 +249,8 @@ fn which(name: &str) -> Option<PathBuf> {
 struct LspClient {
     child: Child,
     stdin: ChildStdin,
-    reader: BufReader<ChildStdout>,
+    reader_rx: Receiver<Result<Value>>,
+    reader_thread: Option<JoinHandle<()>>,
     next_id: i64,
     indexing_done: bool,
 }
@@ -276,10 +279,12 @@ impl LspClient {
             .context("spawning rust-analyzer")?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+        let (reader_rx, reader_thread) = spawn_lsp_reader(stdout);
         Ok(Self {
             child,
             stdin,
-            reader: BufReader::new(stdout),
+            reader_rx,
+            reader_thread: Some(reader_thread),
             next_id: 0,
             indexing_done: false,
         })
@@ -405,7 +410,21 @@ impl LspClient {
             "jsonrpc": "2.0",
             "method": "exit"
         }));
-        let _ = self.child.wait();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if self.child.try_wait()?.is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        if let Some(reader_thread) = self.reader_thread.take() {
+            let _ = reader_thread.join();
+        }
         Ok(())
     }
 
@@ -456,18 +475,16 @@ impl LspClient {
     }
 
     /// Read a single LSP message (Content-Length framed) from the child.
-    /// Honors `deadline` on a best-effort basis — we enforce a per-read
-    /// budget but can't cancel mid-read.
+    /// The actual blocking IO happens on a background reader thread; this
+    /// method waits on its channel with a hard timeout so analyzer deadlines
+    /// do not depend on rust-analyzer being well-behaved.
     fn read_next(&mut self, deadline: Instant) -> Result<Value> {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             bail!("deadline exceeded before read");
         }
-        // Stdio-based reading is inherently blocking; rely on the child
-        // process being well-behaved. The per-request timeout caps worst-
-        // case wait.
         let effective = remaining.min(REQUEST_TIMEOUT);
-        read_message(&mut self.reader, effective)
+        recv_lsp_message(&self.reader_rx, effective)
     }
 }
 
@@ -475,19 +492,40 @@ impl LspClient {
 // Wire format and parsing (pure; easy to unit-test)
 // ---------------------------------------------------------------------------
 
-/// Read one Content-Length-framed JSON message. Respects `budget` as a
-/// deadline for the whole read; returns an error rather than blocking
-/// forever if the child goes quiet.
-fn read_message<R: Read + BufRead>(reader: &mut R, budget: Duration) -> Result<Value> {
-    let start = Instant::now();
+fn spawn_lsp_reader(stdout: ChildStdout) -> (Receiver<Result<Value>>, JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let msg = read_message(&mut reader);
+            let should_stop = msg.is_err();
+            if tx.send(msg).is_err() || should_stop {
+                break;
+            }
+        }
+    });
+    (rx, handle)
+}
+
+fn recv_lsp_message(rx: &Receiver<Result<Value>>, timeout: Duration) -> Result<Value> {
+    match rx.recv_timeout(timeout) {
+        Ok(msg) => msg,
+        Err(RecvTimeoutError::Timeout) => {
+            bail!("timeout reading LSP message after {timeout:?}")
+        }
+        Err(RecvTimeoutError::Disconnected) => bail!("LSP reader thread exited"),
+    }
+}
+
+/// Read one Content-Length-framed JSON message. This function may block;
+/// callers that need deadlines must run it on a separate reader thread and
+/// wait on that thread's channel with a timeout.
+fn read_message<R: Read + BufRead>(reader: &mut R) -> Result<Value> {
     let mut content_length: Option<usize> = None;
     let mut line = String::new();
 
     // Read headers until blank line.
     loop {
-        if start.elapsed() > budget {
-            bail!("timeout reading LSP headers after {budget:?}");
-        }
         line.clear();
         let n = reader.read_line(&mut line).context("reading LSP header")?;
         if n == 0 {
@@ -646,7 +684,7 @@ mod tests {
         let body = r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
         let raw = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
         let mut cursor = std::io::BufReader::new(raw.as_bytes());
-        let msg = read_message(&mut cursor, Duration::from_secs(1)).unwrap();
+        let msg = read_message(&mut cursor).unwrap();
         assert_eq!(msg["id"], 1);
         assert_eq!(msg["result"]["ok"], true);
     }
@@ -655,7 +693,7 @@ mod tests {
     fn read_message_rejects_missing_content_length() {
         let raw = "Some-Other-Header: 3\r\n\r\n{}";
         let mut cursor = std::io::BufReader::new(raw.as_bytes());
-        let err = read_message(&mut cursor, Duration::from_secs(1)).unwrap_err();
+        let err = read_message(&mut cursor).unwrap_err();
         assert!(format!("{err:#}").contains("Content-Length"));
     }
 
@@ -664,8 +702,18 @@ mod tests {
         let body = r#"{"x":1}"#;
         let raw = format!("content-length: {}\r\n\r\n{}", body.len(), body);
         let mut cursor = std::io::BufReader::new(raw.as_bytes());
-        let msg = read_message(&mut cursor, Duration::from_secs(1)).unwrap();
+        let msg = read_message(&mut cursor).unwrap();
         assert_eq!(msg["x"], 1);
+    }
+
+    #[test]
+    fn recv_lsp_message_times_out_when_reader_stalls() {
+        let (_tx, rx) = mpsc::channel::<Result<Value>>();
+        let err = recv_lsp_message(&rx, Duration::from_millis(10)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("timeout reading LSP message"),
+            "expected timeout error, got {err:#}"
+        );
     }
 
     #[test]

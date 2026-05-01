@@ -7,7 +7,7 @@
 [![Release](https://github.com/asmuelle/cargo-impact/actions/workflows/release.yml/badge.svg)](https://github.com/asmuelle/cargo-impact/actions/workflows/release.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-> **Status:** v0.3.0 (stable) on [crates.io](https://crates.io/crates/cargo-impact) — `cargo install cargo-impact`. This README is both the living design spec and the user manual; sections describing yet-unshipped behavior are explicitly called out (§11 has the full shipped-vs-deferred breakdown).
+> **Status:** v0.4.0 (stable) on [crates.io](https://crates.io/crates/cargo-impact) — `cargo install cargo-impact`. This README is both the living design spec and the user manual; sections describing yet-unshipped behavior are explicitly called out (§11 has the full shipped-vs-deferred breakdown).
 
 ## Contents
 
@@ -40,11 +40,11 @@ It answers the critical question: *"I changed X; what is the minimum set of thin
 Pick whichever path fits your environment:
 
 ```bash
-# 1. crates.io (once published — see https://crates.io/crates/cargo-impact)
+# 1. crates.io
 cargo install cargo-impact
 
 # 2. Pinned from source by tag (works today, no crates.io dependency)
-cargo install --git https://github.com/asmuelle/cargo-impact --tag v0.3.0
+cargo install --git https://github.com/asmuelle/cargo-impact --tag v0.4.0
 
 # 3. Prebuilt binary from the GitHub release page
 #    https://github.com/asmuelle/cargo-impact/releases
@@ -197,7 +197,7 @@ Every finding carries a tier. This replaces the fiction that static analysis is 
 
 ## 4. CLI Interface (UX)
 
-Flags below reflect the shipping v0.3.0 surface — `--context`, `--features`, and the `mcp` subcommand are all live. Flags still in flight: `--checklist` (the verification checklist is currently embedded inside `--format markdown` rather than a dedicated output), `--feature-powerset` (CI-grade matrix analysis, v0.4 scope). See §11 for the full roadmap.
+Flags below reflect the shipping v0.4.0 surface. `--checklist` remains embedded inside `--format markdown` rather than a dedicated output mode; see §11 for the full shipped-vs-deferred breakdown.
 
 ```bash
 # Analyze the current working tree against HEAD
@@ -214,6 +214,8 @@ cargo impact --since main
 cargo impact --format text       # default — severity-grouped text with emoji icons
 cargo impact --format markdown   # summary + per-severity sections + verification checklist
 cargo impact --format json       # structured envelope; stable schema for agents
+cargo impact --format sarif      # SARIF v2.1.0 for code-scanning uploads
+cargo impact --format pr-comment # compact GitHub PR comment markdown
 
 # CI gating
 cargo impact --confidence-min 0.6   # hide Possible / Unknown findings
@@ -226,6 +228,10 @@ cargo impact --fail-on medium       # exit 1 on HIGH or MEDIUM
 cargo impact --features tokio,rt            # union with default features
 cargo impact --features tokio --no-default-features
 cargo impact --all-features                 # audit the full feature surface
+cargo impact --feature-powerset             # baseline + no-default + all-features
+
+# Opt-in macro expansion (requires cargo-expand on PATH; graceful no-op if absent).
+cargo impact --macro-expand
 
 # Opt-in public-API breakage detection (requires cargo-semver-checks on PATH;
 # runs rustdoc twice internally, typically 10–30s).

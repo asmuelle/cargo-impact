@@ -456,6 +456,12 @@ where
 {
     let changed_files = git::changed_rust_files(root, &args.since)?;
     if changed_files.is_empty() {
+        progress(&ProgressEvent {
+            stage: "done",
+            current: 1,
+            total: 1,
+            detail: None,
+        });
         return Ok(AnalysisReport {
             changed_files,
             candidate_symbols: Vec::new(),
@@ -674,6 +680,13 @@ where
 pub fn run(args: &ImpactArgs) -> Result<i32> {
     let report = analyze(args)?;
 
+    if args.context {
+        for path in context_file_list(&report) {
+            println!("{}", path.display());
+        }
+        return Ok(0);
+    }
+
     if report.changed_files.is_empty() {
         if args.test {
             println!();
@@ -685,13 +698,6 @@ pub fn run(args: &ImpactArgs) -> Result<i32> {
         } else {
             let out = render_with_budget(args.format, &[], &[], &[], args.budget)?;
             println!("{out}");
-        }
-        return Ok(0);
-    }
-
-    if args.context {
-        for path in context_file_list(&report) {
-            println!("{}", path.display());
         }
         return Ok(0);
     }
@@ -722,6 +728,57 @@ pub fn run(args: &ImpactArgs) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn clean_repo() -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().unwrap();
+        git(dir.path(), &["init", "-q"]);
+        git(dir.path(), &["config", "user.email", "t@t"]);
+        git(dir.path(), &["config", "user.name", "t"]);
+        git(dir.path(), &["config", "commit.gpgsign", "false"]);
+        git(dir.path(), &["config", "core.autocrlf", "false"]);
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname=\"fixture\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn untouched() {}\n").unwrap();
+        git(dir.path(), &["add", "-A"]);
+        git(dir.path(), &["commit", "-q", "-m", "init"]);
+        dir
+    }
+
+    fn args_for(root: &Path) -> ImpactArgs {
+        ImpactArgs {
+            test: false,
+            format: Format::Json,
+            since: "HEAD".into(),
+            manifest_dir: Some(root.to_path_buf()),
+            confidence_min: 0.0,
+            fail_on: None,
+            semver_checks: false,
+            rust_analyzer: false,
+            features: Vec::new(),
+            all_features: false,
+            no_default_features: false,
+            budget: 0,
+            context: false,
+            feature_powerset: false,
+            macro_expand: false,
+        }
+    }
 
     #[test]
     fn fail_on_high_triggers_on_high_only() {
@@ -744,6 +801,17 @@ mod tests {
         assert!(FailOn::Low.triggers(SeverityClass::Medium));
         assert!(FailOn::Low.triggers(SeverityClass::Low));
         assert!(!FailOn::Low.triggers(SeverityClass::Unknown));
+    }
+
+    #[test]
+    fn clean_workspace_progress_still_emits_done() {
+        let dir = clean_repo();
+        let args = args_for(dir.path());
+        let mut stages = Vec::new();
+        let report = analyze_with_progress(&args, |ev| stages.push(ev.stage.to_string())).unwrap();
+
+        assert!(report.changed_files.is_empty());
+        assert_eq!(stages, vec!["done"]);
     }
 
     mod powerset {

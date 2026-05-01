@@ -126,6 +126,22 @@ fn clean_workspace_reports_no_findings_and_exits_zero() {
 }
 
 #[test]
+fn clean_workspace_context_mode_emits_empty_file_list() {
+    let body = "pub fn untouched() {}\n";
+    let dir = seed_repo(
+        &[("Cargo.toml", manifest()), ("src/lib.rs", body)],
+        // No modifications = clean working tree.
+        &[],
+    );
+    let (stdout, code) = run_impact(dir.path(), &["--context"]);
+    assert_eq!(code, 0, "clean --context exit code; stdout:\n{stdout}");
+    assert_eq!(
+        stdout, "",
+        "--context must be a pure file-list stream; clean trees should not emit prose"
+    );
+}
+
+#[test]
 fn trait_signature_change_emits_high_severity_findings() {
     let dir = seed_repo(
         &[

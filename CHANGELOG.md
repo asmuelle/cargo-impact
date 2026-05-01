@@ -54,6 +54,20 @@ out explicitly here.
 - CHANGELOG link references for v0.1.0 (which was never
   git-tagged) now point at the MVP scaffold commit `2fe210e`,
   unbreaking the Spec workflow's lychee link check.
+- Untracked `.rs` files are now included in `changed_files`, including
+  when analysis starts from a workspace member directory. Previously
+  brand-new Rust files could produce an empty report until they were
+  staged.
+- `cargo impact --context` now emits an empty file-list stream for a
+  clean workspace instead of human-readable prose, preserving the
+  `cargo impact --context | cargo context --files-from -` contract.
+- `analyze_with_progress` now emits the final `done` progress event
+  even when the diff is empty, so MCP clients can always complete their
+  progress UI.
+- The rust-analyzer LSP reader now enforces request timeouts from the
+  analyzer thread. Blocking `read_line` / `read_exact` calls run on a
+  background reader, and shutdown kills the subprocess if it ignores
+  `exit`.
 
 ## [0.4.0] — 2026-04-24
 
