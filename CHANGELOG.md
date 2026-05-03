@@ -68,6 +68,13 @@ out explicitly here.
   analyzer thread. Blocking `read_line` / `read_exact` calls run on a
   background reader, and shutdown kills the subprocess if it ignores
   `exit`.
+- Inline module containers are no longer marked as changed when a
+  nested child item changed. This avoids promoting ubiquitous module
+  names like `tests` into candidate symbols.
+- The syn-only test scanner now matches path/type identifiers in test
+  bodies rather than every token. Method-call names such as
+  `.collect()` no longer create false-positive test references for a
+  changed private free function named `collect`.
 
 ## [0.4.0] — 2026-04-24
 

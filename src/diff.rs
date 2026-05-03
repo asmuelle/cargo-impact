@@ -142,8 +142,10 @@ fn collect(
                     modules.push(m.ident.to_string());
                     collect(inner, modules, out);
                     modules.pop();
+                    None
+                } else {
+                    Some((m.ident.to_string(), SymbolKind::Mod, item_tokens(item)))
                 }
-                Some((m.ident.to_string(), SymbolKind::Mod, item_tokens(item)))
             }
             _ => None,
         };
@@ -271,6 +273,25 @@ mod tests {
                 .any(|(name, change)| *name == "Greeter" && *change == ItemChange::Modified),
             "expected the changed nested trait to survive alongside same-named siblings: {items:?}"
         );
+    }
+
+    #[test]
+    fn inline_module_container_not_marked_when_child_changes() {
+        let (dir, rel) = git_fixture(
+            "mod tests { fn helper() -> u32 { 1 } }\n",
+            Some("mod tests { fn helper() -> u32 { 2 } }\n"),
+        );
+        let items = diff_file(dir.path(), &rel, "HEAD").unwrap().unwrap();
+        assert_eq!(names(&items), vec![("helper", ItemChange::Modified)]);
+    }
+
+    #[test]
+    fn external_module_declaration_changes_are_kept() {
+        let (dir, rel) = git_fixture("mod generated;\n", Some("mod renamed;\n"));
+        let items = diff_file(dir.path(), &rel, "HEAD").unwrap().unwrap();
+        let got = names(&items);
+        assert!(got.contains(&("generated", ItemChange::Removed)));
+        assert!(got.contains(&("renamed", ItemChange::Added)));
     }
 
     #[test]

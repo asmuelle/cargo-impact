@@ -50,7 +50,7 @@ cargo +1.95 clippy --all-targets --all-features --locked -- -D warnings
 cargo +1.95 test --all-features --locked
 ```
 
-The test total is **261** (248 lib + 12 integration + 1 doctest).
+The test total is **266** (253 lib + 12 integration + 1 doctest).
 Any added code should add tests; any green-to-green diff should keep
 that total accurate in the commit message.
 

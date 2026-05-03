@@ -51,8 +51,10 @@ fn collect_items(items: &[Item], out: &mut Vec<TopLevelSymbol>) {
             Item::Mod(m) => {
                 if let Some((_, inner)) = &m.content {
                     collect_items(inner, out);
+                    None
+                } else {
+                    Some((m.ident.to_string(), SymbolKind::Mod))
                 }
-                Some((m.ident.to_string(), SymbolKind::Mod))
             }
             _ => None,
         };
@@ -99,9 +101,18 @@ mod tests {
             write_temp("mod outer {\n    pub fn inner_fn() {}\n    pub struct InnerStruct;\n}\n");
         let syms = top_level_symbols(f.path()).unwrap();
         let names: Vec<_> = syms.iter().map(|s| s.name.clone()).collect();
-        assert!(names.iter().any(|n| n == "outer"));
+        assert!(!names.iter().any(|n| n == "outer"));
         assert!(names.iter().any(|n| n == "inner_fn"));
         assert!(names.iter().any(|n| n == "InnerStruct"));
+    }
+
+    #[test]
+    fn keeps_external_module_declarations() {
+        let f = write_temp("mod generated;\n");
+        let syms = top_level_symbols(f.path()).unwrap();
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "generated");
+        assert_eq!(syms[0].kind, SymbolKind::Mod);
     }
 
     #[test]

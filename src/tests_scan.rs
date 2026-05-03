@@ -1,10 +1,9 @@
 use crate::finding::{Finding, FindingKind, Location, Tier};
 use anyhow::Result;
-use quote::ToTokens;
 use std::collections::BTreeSet;
 use std::path::Path;
 use syn::visit::Visit;
-use syn::{Attribute, ItemFn};
+use syn::{Attribute, ExprPath, ItemFn, Path as SynPath, TypePath};
 use walkdir::{DirEntry, WalkDir};
 
 /// Scan `root` for test functions whose body references any changed symbol.
@@ -90,18 +89,45 @@ struct TestVisitor<'a> {
 impl<'ast> Visit<'ast> for TestVisitor<'_> {
     fn visit_item_fn(&mut self, f: &'ast ItemFn) {
         if is_test_fn(&f.attrs) {
-            let body = f.block.to_token_stream().to_string();
-            let matched: BTreeSet<String> = self
-                .changed
-                .iter()
-                .filter(|sym| tokens_contain_ident(&body, sym))
-                .cloned()
-                .collect();
+            let mut refs = ReferenceVisitor {
+                changed: self.changed,
+                matched: BTreeSet::new(),
+            };
+            refs.visit_block(&f.block);
+            let matched = refs.matched;
             if !matched.is_empty() {
                 self.hits.push((f.sig.ident.to_string(), matched));
             }
         }
         syn::visit::visit_item_fn(self, f);
+    }
+}
+
+struct ReferenceVisitor<'a> {
+    changed: &'a BTreeSet<String>,
+    matched: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for ReferenceVisitor<'_> {
+    fn visit_expr_path(&mut self, node: &'ast ExprPath) {
+        self.match_path(&node.path);
+        syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_type_path(&mut self, node: &'ast TypePath) {
+        self.match_path(&node.path);
+        syn::visit::visit_type_path(self, node);
+    }
+}
+
+impl ReferenceVisitor<'_> {
+    fn match_path(&mut self, path: &SynPath) {
+        for segment in &path.segments {
+            let ident = segment.ident.to_string();
+            if self.changed.contains(&ident) {
+                self.matched.insert(ident);
+            }
+        }
     }
 }
 
@@ -216,6 +242,35 @@ mod tests {
         )]);
         let hits = find_affected_tests(dir.path(), &symbols(&["login"])).unwrap();
         assert!(hits.is_empty(), "unexpected hits: {hits:?}");
+    }
+
+    #[test]
+    fn does_not_match_method_call_names_as_free_functions() {
+        let dir = setup(&[(
+            "tests/method.rs",
+            "#[test] fn t() { let xs = vec![1, 2]; let _: Vec<_> = xs.iter().collect(); }",
+        )]);
+        let hits = find_affected_tests(dir.path(), &symbols(&["collect"])).unwrap();
+        assert!(hits.is_empty(), "unexpected hits: {hits:?}");
+    }
+
+    #[test]
+    fn matches_type_and_qualified_path_references() {
+        let dir = setup(&[(
+            "tests/path_refs.rs",
+            "#[test] fn t() { let _: User = crate::make_user(); let _ = User::default(); }",
+        )]);
+        let hits = find_affected_tests(dir.path(), &symbols(&["User", "make_user"])).unwrap();
+        assert_eq!(hits.len(), 1);
+        match &hits[0].kind {
+            FindingKind::TestReference {
+                matched_symbols, ..
+            } => {
+                assert!(matched_symbols.contains(&"User".to_string()));
+                assert!(matched_symbols.contains(&"make_user".to_string()));
+            }
+            other => panic!("expected TestReference, got {other:?}"),
+        }
     }
 
     #[test]
