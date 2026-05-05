@@ -172,6 +172,7 @@ mod tests {
             context: false,
             feature_powerset: false,
             macro_expand: false,
+            cache: false,
         }
     }
 

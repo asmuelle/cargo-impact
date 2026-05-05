@@ -5,7 +5,7 @@ use syn::Item;
 
 /// Categorization of a top-level Rust item. Trait ripple and dyn-dispatch
 /// analysis filter on this.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SymbolKind {
     Fn,
     Struct,
@@ -18,7 +18,7 @@ pub enum SymbolKind {
     Mod,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TopLevelSymbol {
     pub name: String,
     pub kind: SymbolKind,

@@ -79,7 +79,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 mod adapters;
-pub mod cache;
+mod cache;
 mod cfg;
 mod config;
 mod dedup;
@@ -245,8 +245,9 @@ pub struct ImpactArgs {
     pub feature_powerset: bool,
 
     /// Enable content-hash caching for incremental analysis.
-    /// Caches parsed ASTs and file metadata to disk, avoiding re-parsing
-    /// unchanged files across runs. Cache lives at `target/cargo-impact/cache/`.
+    /// Caches top-level symbol extraction by file content hash, avoiding
+    /// re-parsing unchanged fallback files across runs. Cache lives at
+    /// `target/cargo-impact/cache/`.
     #[arg(long)]
     pub cache: bool,
 }
@@ -462,14 +463,15 @@ where
     F: FnMut(&ProgressEvent<'_>),
 {
     let changed_files = git::changed_rust_files(root, &args.since)?;
-    
-    // Initialize incremental cache if enabled
-    let mut file_cache = if args.cache {
-        Some(cache::FileCache::new(root))
+
+    let mut symbol_cache = if args.cache {
+        Some(
+            cache::ContentHashCache::<Vec<symbols::TopLevelSymbol>>::new(root, "top-level-symbols"),
+        )
     } else {
         None
     };
-    
+
     if changed_files.is_empty() {
         progress(&ProgressEvent {
             stage: "done",
@@ -506,7 +508,7 @@ where
             }
             Ok(None) => {
                 let abs = root.join(rel);
-                match symbols::top_level_symbols(&abs) {
+                match top_level_symbols_cached(&abs, symbol_cache.as_mut()) {
                     Ok(syms) => all_symbols.extend(syms),
                     Err(e) => eprintln!("cargo-impact: skipping {}: {e:#}", rel.display()),
                 }
@@ -682,11 +684,7 @@ where
         detail: None,
     });
 
-    // Save incremental cache if enabled
-    if let Some(ref mut cache) = file_cache {
-        for f in &changed_files {
-            cache.record(root, f);
-        }
+    if let Some(cache) = &symbol_cache {
         cache.save();
     }
 
@@ -695,6 +693,25 @@ where
         candidate_symbols,
         findings,
     })
+}
+
+fn top_level_symbols_cached(
+    file: &std::path::Path,
+    cache: Option<&mut cache::ContentHashCache<Vec<symbols::TopLevelSymbol>>>,
+) -> Result<Vec<symbols::TopLevelSymbol>> {
+    let Some(cache) = cache else {
+        return symbols::top_level_symbols(file);
+    };
+    let Some(hash) = cache::file_hash(file) else {
+        return symbols::top_level_symbols(file);
+    };
+    let cache_key = format!("{:?}:{hash}", cfg::current_features());
+    if let Some(symbols) = cache.get(&cache_key) {
+        return Ok(symbols.clone());
+    }
+    let symbols = symbols::top_level_symbols(file)?;
+    cache.insert(cache_key, symbols.clone());
+    Ok(symbols)
 }
 
 /// CLI entry: runs [`analyze`], prints the configured format, honors the
