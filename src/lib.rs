@@ -79,6 +79,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 mod adapters;
+pub mod cache;
 mod cfg;
 mod config;
 mod dedup;
@@ -242,6 +243,12 @@ pub struct ImpactArgs {
     /// combinatorial blow-up.
     #[arg(long)]
     pub feature_powerset: bool,
+
+    /// Enable content-hash caching for incremental analysis.
+    /// Caches parsed ASTs and file metadata to disk, avoiding re-parsing
+    /// unchanged files across runs. Cache lives at `target/cargo-impact/cache/`.
+    #[arg(long)]
+    pub cache: bool,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -455,6 +462,14 @@ where
     F: FnMut(&ProgressEvent<'_>),
 {
     let changed_files = git::changed_rust_files(root, &args.since)?;
+    
+    // Initialize incremental cache if enabled
+    let mut file_cache = if args.cache {
+        Some(cache::FileCache::new(root))
+    } else {
+        None
+    };
+    
     if changed_files.is_empty() {
         progress(&ProgressEvent {
             stage: "done",
@@ -667,6 +682,14 @@ where
         detail: None,
     });
 
+    // Save incremental cache if enabled
+    if let Some(ref mut cache) = file_cache {
+        for f in &changed_files {
+            cache.record(root, f);
+        }
+        cache.save();
+    }
+
     Ok(AnalysisReport {
         changed_files,
         candidate_symbols,
@@ -777,6 +800,7 @@ mod tests {
             context: false,
             feature_powerset: false,
             macro_expand: false,
+            cache: false,
         }
     }
 

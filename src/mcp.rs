@@ -309,6 +309,7 @@ impl AnalyzeArgs {
             context: false,
             feature_powerset: self.feature_powerset.unwrap_or(false),
             macro_expand: self.macro_expand.unwrap_or(false),
+            cache: false, // MCP calls don't use file cache
         }
     }
 }
