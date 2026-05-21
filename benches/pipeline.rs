@@ -286,7 +286,7 @@ fn bench_analyze_with_rust_analyzer(c: &mut Criterion) {
         macro_expand: false,
         cache: false,
     };
-    
+
     // Warm-up run to index the repository in the cache
     let _warmup = cargo_impact::analyze(&args).unwrap();
 

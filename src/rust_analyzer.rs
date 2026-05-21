@@ -334,7 +334,9 @@ impl LspClient {
             // Determine our timeout. If indexing hasn't started yet, use a short grace period (e.g. 200ms)
             // to detect if indexing will start, avoiding the REQUEST_TIMEOUT (15s) wait on a warm cache.
             let timeout = if self.indexing_started {
-                deadline.saturating_duration_since(Instant::now()).min(REQUEST_TIMEOUT)
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(REQUEST_TIMEOUT)
             } else {
                 let elapsed = start_wait.elapsed();
                 let grace_period = Duration::from_millis(200);
