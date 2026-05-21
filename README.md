@@ -7,7 +7,7 @@
 [![Release](https://github.com/asmuelle/cargo-impact/actions/workflows/release.yml/badge.svg)](https://github.com/asmuelle/cargo-impact/actions/workflows/release.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-> **Status:** v0.4.0 (stable) on [crates.io](https://crates.io/crates/cargo-impact) — `cargo install cargo-impact`. This README is both the living design spec and the user manual; sections describing yet-unshipped behavior are explicitly called out (§11 has the full shipped-vs-deferred breakdown).
+> **Status:** v0.5.0 (stable) on [crates.io](https://crates.io/crates/cargo-impact) — `cargo install cargo-impact`. This README is both the living design spec and the user manual; sections describing yet-unshipped behavior are explicitly called out (§11 has the full shipped-vs-deferred breakdown).
 
 ## Contents
 
@@ -44,7 +44,7 @@ Pick whichever path fits your environment:
 cargo install cargo-impact
 
 # 2. Pinned from source by tag (works today, no crates.io dependency)
-cargo install --git https://github.com/asmuelle/cargo-impact --tag v0.4.0
+cargo install --git https://github.com/asmuelle/cargo-impact --tag v0.5.0
 
 # 3. Prebuilt binary from the GitHub release page
 #    https://github.com/asmuelle/cargo-impact/releases
@@ -197,7 +197,7 @@ Every finding carries a tier. This replaces the fiction that static analysis is 
 
 ## 4. CLI Interface (UX)
 
-Flags below reflect the shipping v0.4.0 surface. `--checklist` remains embedded inside `--format markdown` rather than a dedicated output mode; see §11 for the full shipped-vs-deferred breakdown.
+Flags below reflect the shipping v0.5.0 surface. `--checklist` remains embedded inside `--format markdown` rather than a dedicated output mode; see §11 for the full shipped-vs-deferred breakdown.
 
 ```bash
 # Analyze the current working tree against HEAD
