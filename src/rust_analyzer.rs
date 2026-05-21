@@ -253,6 +253,7 @@ struct LspClient {
     reader_thread: Option<JoinHandle<()>>,
     next_id: i64,
     indexing_done: bool,
+    indexing_started: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -287,6 +288,7 @@ impl LspClient {
             reader_thread: Some(reader_thread),
             next_id: 0,
             indexing_done: false,
+            indexing_started: false,
         })
     }
 
@@ -327,14 +329,40 @@ impl LspClient {
     /// Returns once we see `$/progress` with `kind: "end"` on the
     /// `rustAnalyzer/Indexing` token, or once the deadline passes.
     fn wait_for_indexing(&mut self, deadline: Instant) -> Result<()> {
+        let start_wait = Instant::now();
         while !self.indexing_done && Instant::now() < deadline {
-            let msg = match self.read_next(deadline) {
+            // Determine our timeout. If indexing hasn't started yet, use a short grace period (e.g. 200ms)
+            // to detect if indexing will start, avoiding the REQUEST_TIMEOUT (15s) wait on a warm cache.
+            let timeout = if self.indexing_started {
+                deadline.saturating_duration_since(Instant::now()).min(REQUEST_TIMEOUT)
+            } else {
+                let elapsed = start_wait.elapsed();
+                let grace_period = Duration::from_millis(200);
+                if elapsed >= grace_period {
+                    return Ok(());
+                }
+                grace_period - elapsed
+            };
+
+            if timeout.is_zero() {
+                if !self.indexing_started {
+                    return Ok(());
+                }
+                break;
+            }
+
+            let msg = match recv_lsp_message(&self.reader_rx, timeout) {
                 Ok(m) => m,
-                Err(_) => return Ok(()), // deadline hit inside read
+                Err(_) => {
+                    if !self.indexing_started {
+                        return Ok(());
+                    }
+                    return Ok(());
+                }
             };
             self.handle_notification(&msg);
         }
-        if !self.indexing_done {
+        if !self.indexing_done && self.indexing_started {
             bail!("indexing did not complete within {INDEXING_TIMEOUT:?}");
         }
         Ok(())
@@ -454,7 +482,7 @@ impl LspClient {
     }
 
     fn handle_notification(&mut self, msg: &Value) {
-        // Only care about $/progress end events with our token — RA
+        // Only care about $/progress events with our token — RA
         // emits structured progress for indexing.
         if msg.get("method").and_then(Value::as_str) == Some("$/progress") {
             let token = msg
@@ -468,8 +496,12 @@ impl LspClient {
                 .and_then(|v| v.get("kind"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            if token.contains("Indexing") && kind == "end" {
-                self.indexing_done = true;
+            if token.contains("Indexing") {
+                if kind == "begin" {
+                    self.indexing_started = true;
+                } else if kind == "end" {
+                    self.indexing_done = true;
+                }
             }
         }
     }

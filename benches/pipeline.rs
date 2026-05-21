@@ -224,10 +224,89 @@ fn bench_analyze_with_changes(c: &mut Criterion) {
     });
 }
 
+fn is_rust_analyzer_installed() -> bool {
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join("rust-analyzer");
+        if candidate.is_file() {
+            return true;
+        }
+    }
+    false
+}
+
+fn bench_analyze_with_rust_analyzer(c: &mut Criterion) {
+    if !is_rust_analyzer_installed() {
+        return;
+    }
+    let dir = seed_repo(
+        &[
+            ("Cargo.toml", manifest()),
+            (
+                "src/lib.rs",
+                "pub trait Greeter { fn hi(&self) -> u32; }\n\
+                 pub struct Friend;\n\
+                 impl Greeter for Friend { fn hi(&self) -> u32 { 1 } }\n\
+                 #[cfg(test)]\n\
+                 mod tests {\n\
+                   use super::*;\n\
+                   #[test] fn greets() { Friend.hi(); }\n\
+                 }\n",
+            ),
+        ],
+        &[(
+            "src/lib.rs",
+            "pub trait Greeter { fn hi(&self) -> String; }\n\
+             pub struct Friend;\n\
+             impl Greeter for Friend { fn hi(&self) -> String { String::new() } }\n\
+             #[cfg(test)]\n\
+             mod tests {\n\
+               use super::*;\n\
+               #[test] fn greets() { let _ = Friend.hi(); }\n\
+             }\n",
+        )],
+    );
+    let root = dir.path().to_path_buf();
+
+    let args = cargo_impact::ImpactArgs {
+        test: false,
+        format: Format::Json,
+        since: "HEAD".into(),
+        manifest_dir: Some(root.clone()),
+        confidence_min: 0.0,
+        fail_on: None,
+        semver_checks: false,
+        rust_analyzer: true,
+        features: Vec::new(),
+        all_features: false,
+        no_default_features: false,
+        budget: 0,
+        context: false,
+        feature_powerset: false,
+        macro_expand: false,
+        cache: false,
+    };
+    
+    // Warm-up run to index the repository in the cache
+    let _warmup = cargo_impact::analyze(&args).unwrap();
+
+    c.bench_function("analyze_with_rust_analyzer", |b| {
+        b.iter(|| {
+            let report = cargo_impact::analyze(&args).unwrap();
+            assert!(
+                !report.findings.is_empty(),
+                "fixture should produce findings"
+            );
+            black_box(report);
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_render_formats,
     bench_analyze_clean,
     bench_analyze_with_changes,
+    bench_analyze_with_rust_analyzer,
 );
 criterion_main!(benches);
