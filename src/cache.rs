@@ -71,7 +71,10 @@ impl<V: serde::de::DeserializeOwned + serde::Serialize> ContentHashCache<V> {
 pub fn file_hash(path: &Path) -> Option<String> {
     let contents = std::fs::read(path).ok()?;
     let hash = Sha256::digest(&contents);
-    Some(format!("{:x}", hash))
+    // sha2 0.11 returns `hybrid_array::Array`, which (unlike the old
+    // `generic_array::GenericArray`) does not implement `LowerHex`, so
+    // hex-encode the digest bytes ourselves.
+    Some(hash.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 #[cfg(test)]
