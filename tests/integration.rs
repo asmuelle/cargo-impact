@@ -637,3 +637,82 @@ fn output_is_byte_identical_across_two_runs_for_every_format() {
         );
     }
 }
+
+#[test]
+fn transitive_call_graph_tracing() {
+    let initial_src = "pub fn a() {}\n\
+                       pub fn b() { a(); }\n\
+                       pub fn c() { b(); }\n\
+                       pub fn d() { c(); }\n";
+    let changed_src = "pub fn a() { println!(\"changed\"); }\n\
+                       pub fn b() { a(); }\n\
+                       pub fn c() { b(); }\n\
+                       pub fn d() { c(); }\n";
+    let dir = seed_repo(
+        &[("Cargo.toml", manifest()), ("src/lib.rs", initial_src)],
+        &[("src/lib.rs", changed_src)],
+    );
+
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let (stdout, code) = run_impact(
+        &canonical_root,
+        &[
+            "--format",
+            "json",
+            "--rust-analyzer",
+            "--transitive-depth",
+            "3",
+        ],
+    );
+    assert_eq!(code, 0, "run failed; stdout:\n{stdout}");
+
+    let report: Value = serde_json::from_str(&stdout).expect("parse JSON");
+    let findings = report["findings"].as_array().expect("findings array");
+
+    let refs: Vec<_> = findings
+        .iter()
+        .filter(|f| f["kind"] == "resolved_reference")
+        .collect();
+
+    assert!(
+        refs.len() >= 3,
+        "expected at least 3 resolved references, found: {:#?}\nSTDOUT:\n{}",
+        refs,
+        stdout
+    );
+
+    let mut has_direct = false;
+    let mut has_transitive_b_c = false;
+    let mut has_transitive_c_d = false;
+
+    for r in &refs {
+        let evidence = r["evidence"].as_str().unwrap();
+        if evidence.contains("resolves a reference from src/lib.rs:")
+            && evidence.contains("to `a` (defined in src/lib.rs)")
+        {
+            has_direct = true;
+        }
+        if evidence.contains("resolves a transitive reference chain: a -> b -> src/lib.rs:") {
+            has_transitive_b_c = true;
+        }
+        if evidence.contains("resolves a transitive reference chain: a -> b -> c -> src/lib.rs:") {
+            has_transitive_c_d = true;
+        }
+    }
+
+    assert!(
+        has_direct,
+        "missing direct reference finding: a -> b; evidence: {:#?}",
+        refs
+    );
+    assert!(
+        has_transitive_b_c,
+        "missing transitive reference finding: a -> b -> c; evidence: {:#?}",
+        refs
+    );
+    assert!(
+        has_transitive_c_d,
+        "missing transitive reference finding: a -> b -> c -> d; evidence: {:#?}",
+        refs
+    );
+}

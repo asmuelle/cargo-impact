@@ -63,6 +63,7 @@ pub struct Defaults {
     pub all_features: Option<bool>,
     pub no_default_features: Option<bool>,
     pub budget: Option<usize>,
+    pub transitive_depth: Option<u32>,
 }
 
 impl ConfigFile {
@@ -148,6 +149,11 @@ pub fn apply_config(defaults: &Defaults, args: &mut ImpactArgs) {
     {
         args.budget = v;
     }
+    if let Some(v) = defaults.transitive_depth
+        && args.transitive_depth == 3
+    {
+        args.transitive_depth = v;
+    }
 }
 
 #[cfg(test)]
@@ -173,6 +179,7 @@ mod tests {
             feature_powerset: false,
             macro_expand: false,
             cache: false,
+            transitive_depth: 3,
         }
     }
 

@@ -83,6 +83,7 @@ pub fn run(
     changed_files: &[PathBuf],
     changed_symbols: &BTreeSet<String>,
     enabled: bool,
+    transitive_depth: u32,
 ) -> Result<Vec<Finding>> {
     if !enabled {
         return Ok(Vec::new());
@@ -123,94 +124,160 @@ pub fn run(
         );
     }
 
+    struct BfsItem {
+        file: PathBuf,
+        symbol_name: String,
+        line: u32,
+        character: u32,
+        depth: u32,
+        path: Vec<String>,
+        source_symbol: String,
+    }
+
     let mut findings = Vec::new();
+    let mut queue = std::collections::VecDeque::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut doc_symbols_cache = std::collections::HashMap::new();
+
+    // Seed BFS queue with changed top-level symbols in the changed files.
     for rel in changed_files {
-        if Instant::now() >= deadline {
-            eprintln!(
-                "cargo-impact: rust-analyzer total-time budget exhausted; \
-                 stopping after {} files.",
-                changed_files
-                    .iter()
-                    .position(|f| f == rel)
-                    .unwrap_or(changed_files.len())
-            );
-            break;
-        }
         let abs = root.join(rel);
-        match collect_references_for_file(&mut client, root, &abs, rel, changed_symbols, deadline) {
-            Ok(hits) => findings.extend(hits),
-            Err(e) => eprintln!(
-                "cargo-impact: rust-analyzer query failed for {}: {e:#}; skipping file",
-                rel.display()
-            ),
+        let symbols = match client.document_symbols(&abs, deadline) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "cargo-impact: failed to get document symbols for {}: {e:#}; skipping seeds",
+                    rel.display()
+                );
+                continue;
+            }
+        };
+        doc_symbols_cache.insert(abs.clone(), symbols.clone());
+
+        for sym in symbols {
+            if changed_symbols.contains(&sym.name) {
+                let item = BfsItem {
+                    file: abs.clone(),
+                    symbol_name: sym.name.clone(),
+                    line: sym.line,
+                    character: sym.character,
+                    depth: 0,
+                    path: vec![sym.name.clone()],
+                    source_symbol: sym.name.clone(),
+                };
+                visited.insert((abs.clone(), sym.start_line));
+                queue.push_back(item);
+            }
         }
     }
 
-    let _ = client.shutdown();
-    Ok(findings)
-}
-
-/// For one file, enumerate top-level symbols via `documentSymbol`, keep
-/// only those whose name appears in `changed_symbols`, and query
-/// `textDocument/references` for each.
-fn collect_references_for_file(
-    client: &mut LspClient,
-    root: &Path,
-    abs: &Path,
-    rel: &Path,
-    changed_symbols: &BTreeSet<String>,
-    deadline: Instant,
-) -> Result<Vec<Finding>> {
-    let symbols = client.document_symbols(abs, deadline)?;
-    let mut findings = Vec::new();
-    for sym in symbols {
-        if !changed_symbols.contains(&sym.name) {
-            continue;
-        }
+    // Process references BFS queue
+    while let Some(item) = queue.pop_front() {
         if Instant::now() >= deadline {
+            eprintln!(
+                "cargo-impact: rust-analyzer total-time budget exhausted during BFS traversal"
+            );
             break;
         }
-        let refs = client.references(abs, sym.line, sym.character, deadline)?;
+
+        let refs = match client.references(&item.file, item.line, item.character, deadline) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!(
+                    "cargo-impact: rust-analyzer references query failed for {} in {}: {e:#}",
+                    item.symbol_name,
+                    item.file.display()
+                );
+                continue;
+            }
+        };
+
         for loc in refs {
             let target_file = uri_to_relative_path(&loc.uri, root);
-            // Classify the reference's enclosing context (test fn,
-            // impl block, plain caller) to refine severity. The file
-            // we classify is the *referencing* file — that's where
-            // `loc` points. `loc.uri` is resolved to an absolute path
-            // via uri_to_absolute_path; if it can't be resolved we
-            // keep the default severity (Medium) by letting classify()
-            // fall back to Caller on a missing-file read.
-            let referencing_abs = uri_to_absolute_path(&loc.uri).unwrap_or_else(|| {
-                // Fallback: if we can't extract an abs path from the
-                // URI, attempt the join-with-root heuristic. Happens
-                // for URIs pointing into external crate sources under
-                // weird schemes.
-                root.join(&target_file)
-            });
+            let referencing_abs =
+                uri_to_absolute_path(&loc.uri).unwrap_or_else(|| root.join(&target_file));
+
             let context = ref_context::classify(&referencing_abs, loc.line + 1);
+
+            let evidence = if item.depth == 0 {
+                format!(
+                    "rust-analyzer resolves a reference from {}:{} to `{}` (defined in {})",
+                    target_file.display(),
+                    loc.line + 1,
+                    item.symbol_name,
+                    item.file.strip_prefix(root).unwrap_or(&item.file).display()
+                )
+            } else {
+                format!(
+                    "rust-analyzer resolves a transitive reference chain: {} -> {}:{}",
+                    item.path.join(" -> "),
+                    target_file.display(),
+                    loc.line + 1
+                )
+            };
+
             let finding = Finding::new(
                 "",
                 Tier::Proven,
                 0.98,
                 FindingKind::ResolvedReference {
-                    source_symbol: sym.name.clone(),
+                    source_symbol: item.source_symbol.clone(),
                     target: Location {
                         file: target_file.clone(),
                         symbol: format!("{}:{}", target_file.display(), loc.line + 1),
                     },
                 },
-                format!(
-                    "rust-analyzer resolves a reference from {}:{} to `{}` (defined in {})",
-                    target_file.display(),
-                    loc.line + 1,
-                    sym.name,
-                    rel.display()
-                ),
+                evidence,
             )
             .with_severity(context.refined_severity());
             findings.push(finding);
+
+            // Transitive lookup if depth remains
+            if item.depth < transitive_depth {
+                if !doc_symbols_cache.contains_key(&referencing_abs)
+                    && let Ok(syms) = client.document_symbols(&referencing_abs, deadline)
+                {
+                    doc_symbols_cache.insert(referencing_abs.clone(), syms);
+                }
+
+                if let Some(syms) = doc_symbols_cache.get(&referencing_abs) {
+                    let mut best_sym: Option<&SymbolLoc> = None;
+                    for sym in syms {
+                        if sym.start_line <= loc.line && loc.line <= sym.end_line {
+                            if let Some(curr) = best_sym {
+                                let curr_len = curr.end_line - curr.start_line;
+                                let sym_len = sym.end_line - sym.start_line;
+                                if sym_len < curr_len {
+                                    best_sym = Some(sym);
+                                }
+                            } else {
+                                best_sym = Some(sym);
+                            }
+                        }
+                    }
+
+                    if let Some(sym) = best_sym
+                        && !visited.contains(&(referencing_abs.clone(), sym.start_line))
+                    {
+                        visited.insert((referencing_abs.clone(), sym.start_line));
+                        let mut new_path = item.path.clone();
+                        new_path.push(sym.name.clone());
+                        queue.push_back(BfsItem {
+                            file: referencing_abs.clone(),
+                            symbol_name: sym.name.clone(),
+                            line: sym.line,
+                            character: sym.character,
+                            depth: item.depth + 1,
+                            path: new_path,
+                            source_symbol: item.source_symbol.clone(),
+                        });
+                    }
+                }
+            }
         }
     }
+
+    let _ = client.shutdown();
     Ok(findings)
 }
 
@@ -261,6 +328,8 @@ struct SymbolLoc {
     name: String,
     line: u32,
     character: u32,
+    start_line: u32,
+    end_line: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -339,7 +408,7 @@ impl LspClient {
                     .min(REQUEST_TIMEOUT)
             } else {
                 let elapsed = start_wait.elapsed();
-                let grace_period = Duration::from_millis(200);
+                let grace_period = Duration::from_millis(5000);
                 if elapsed >= grace_period {
                     return Ok(());
                 }
@@ -612,6 +681,18 @@ fn collect_document_symbol(sym: &Value, out: &mut Vec<SymbolLoc>) {
         .get("selectionRange")
         .and_then(|r| r.get("start"))
         .or_else(|| sym.get("range").and_then(|r| r.get("start")));
+    let range = sym.get("range");
+    let start_line = range
+        .and_then(|r| r.get("start"))
+        .and_then(|s| s.get("line"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
+    let end_line = range
+        .and_then(|r| r.get("end"))
+        .and_then(|e| e.get("line"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
+
     if let Some(p) = pos
         && !name.is_empty()
     {
@@ -619,6 +700,8 @@ fn collect_document_symbol(sym: &Value, out: &mut Vec<SymbolLoc>) {
             name,
             line: p.get("line").and_then(Value::as_u64).unwrap_or(0) as u32,
             character: p.get("character").and_then(Value::as_u64).unwrap_or(0) as u32,
+            start_line,
+            end_line,
         });
     }
     if let Some(children) = sym.get("children").and_then(Value::as_array) {
@@ -843,7 +926,7 @@ mod tests {
 
     #[test]
     fn disabled_flag_returns_empty() {
-        let findings = run(Path::new("."), &[], &BTreeSet::new(), false).unwrap();
+        let findings = run(Path::new("."), &[], &BTreeSet::new(), false, 3).unwrap();
         assert!(findings.is_empty());
     }
 
@@ -852,7 +935,7 @@ mod tests {
         // Even with the flag on, if there are no changed files or symbols
         // we must not spawn RA (which is expensive and may not exist on
         // the test runner).
-        let findings = run(Path::new("."), &[], &BTreeSet::new(), true).unwrap();
+        let findings = run(Path::new("."), &[], &BTreeSet::new(), true, 3).unwrap();
         assert!(findings.is_empty());
     }
 }

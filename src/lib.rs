@@ -250,6 +250,11 @@ pub struct ImpactArgs {
     /// `target/cargo-impact/cache/`.
     #[arg(long)]
     pub cache: bool,
+
+    /// Maximum depth for transitive call-graph references tracing (BFS).
+    /// Default is 3. Only used when rust-analyzer-backed analysis is active.
+    #[arg(long, default_value_t = 3)]
+    pub transitive_depth: u32,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -611,7 +616,13 @@ where
             detail: None,
         });
     }
-    match rust_analyzer::run(root, &changed_files, &symbol_names, args.rust_analyzer) {
+    match rust_analyzer::run(
+        root,
+        &changed_files,
+        &symbol_names,
+        args.rust_analyzer,
+        args.transitive_depth,
+    ) {
         Ok(hits) => findings.extend(hits),
         Err(e) => eprintln!("cargo-impact: rust-analyzer failed: {e:#}"),
     }
@@ -818,6 +829,7 @@ mod tests {
             feature_powerset: false,
             macro_expand: false,
             cache: false,
+            transitive_depth: 3,
         }
     }
 
