@@ -1,0 +1,6 @@
+[mcp_servers.cargo-context]
+command = "cargo-context-mcp"
+
+[mcp_servers.cargo-impact]
+command = "cargo-impact"
+args = ["mcp"]

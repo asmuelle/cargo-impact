@@ -5,6 +5,7 @@
 //!
 //! The cache lives at `target/cargo-impact/cache/` within the workspace.
 
+use crate::debug::debug_log;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -48,15 +49,20 @@ impl<V: serde::de::DeserializeOwned + serde::Serialize> ContentHashCache<V> {
         self.store.insert(hash, value);
     }
 
-    /// Save cache to disk.
+    /// Save cache to disk. Best-effort: a failed save only costs a cache
+    /// miss on the next run, so errors are logged (debug) and swallowed.
     pub fn save(&self) {
         let Some(ref dir) = self.cache_dir else {
             return;
         };
-        let _ = std::fs::create_dir_all(dir);
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            debug_log!("cache: failed to create {}: {e}", dir.display());
+        }
         let path = dir.join(format!("{}.json", self.name));
-        if let Ok(json) = serde_json::to_string(&self.store) {
-            let _ = std::fs::write(&path, json);
+        if let Ok(json) = serde_json::to_string(&self.store)
+            && let Err(e) = std::fs::write(&path, json)
+        {
+            debug_log!("cache: failed to write {}: {e}", path.display());
         }
     }
 
@@ -73,8 +79,13 @@ pub fn file_hash(path: &Path) -> Option<String> {
     let hash = Sha256::digest(&contents);
     // sha2 0.11 returns `hybrid_array::Array`, which (unlike the old
     // `generic_array::GenericArray`) does not implement `LowerHex`, so
-    // hex-encode the digest bytes ourselves.
-    Some(hash.iter().map(|b| format!("{b:02x}")).collect())
+    // hex-encode the digest bytes ourselves (single allocation: a SHA-256
+    // digest is 32 bytes, i.e. 64 hex characters).
+    Some(hash.iter().fold(String::with_capacity(64), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+        s
+    }))
 }
 
 #[cfg(test)]

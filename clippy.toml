@@ -1,0 +1,5 @@
+# Companion to `[lints.clippy]` in Cargo.toml: `unwrap_used` /
+# `expect_used` are denied crate-wide, but panicking on broken
+# invariants is fine inside tests.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

@@ -9,6 +9,11 @@
 //! stripping, feature resolution, orchestrator ordering, JSON envelope
 //! stability, and the overall exit-code contract.
 
+// Test binary: helper fns here sit outside #[test] fns, so clippy.toml's
+// allow-unwrap-in-tests exemption doesn't reach them; panicking on a
+// broken fixture is the right behavior in tests.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use serde_json::Value;
 use std::fs;
 use std::path::Path;

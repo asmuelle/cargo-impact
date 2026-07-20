@@ -46,6 +46,7 @@
 //! * `textDocument/didOpen` push for files RA hasn't auto-indexed —
 //!   normally RA finds them via Cargo, but edge cases exist.
 
+use crate::debug::debug_log;
 use crate::finding::{Finding, FindingKind, Location, Tier};
 use crate::ref_context;
 use anyhow::{Context, Result, anyhow, bail};
@@ -110,7 +111,9 @@ pub fn run(
 
     if let Err(e) = client.initialize(root, deadline) {
         eprintln!("cargo-impact: rust-analyzer initialize failed: {e:#}; skipping.");
-        let _ = client.shutdown();
+        if let Err(e) = client.shutdown() {
+            debug_log!("rust-analyzer: shutdown after failed initialize: {e:#}");
+        }
         return Ok(Vec::new());
     }
 
@@ -277,7 +280,9 @@ pub fn run(
         }
     }
 
-    let _ = client.shutdown();
+    if let Err(e) = client.shutdown() {
+        debug_log!("rust-analyzer: shutdown after query pass: {e:#}");
+    }
     Ok(findings)
 }
 
@@ -515,14 +520,20 @@ impl LspClient {
                 break;
             }
             if Instant::now() >= deadline {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
+                if let Err(e) = self.child.kill() {
+                    debug_log!("rust-analyzer: kill after shutdown timeout: {e}");
+                }
+                if let Err(e) = self.child.wait() {
+                    debug_log!("rust-analyzer: wait after kill: {e}");
+                }
                 break;
             }
             thread::sleep(Duration::from_millis(20));
         }
-        if let Some(reader_thread) = self.reader_thread.take() {
-            let _ = reader_thread.join();
+        if let Some(reader_thread) = self.reader_thread.take()
+            && reader_thread.join().is_err()
+        {
+            debug_log!("rust-analyzer: reader thread panicked during shutdown");
         }
         Ok(())
     }

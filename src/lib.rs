@@ -82,6 +82,7 @@ mod adapters;
 mod cache;
 mod cfg;
 mod config;
+mod debug;
 mod dedup;
 mod derive;
 mod diff;

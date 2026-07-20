@@ -52,6 +52,7 @@
 //! empty finding list — consistent with the project-wide "never fail
 //! the whole run because an optional tool is missing" policy.
 
+use crate::debug::debug_log;
 use crate::finding::{Finding, FindingKind, Location, Tier};
 use crate::tests_scan::{is_test_fn, tokens_contain_ident};
 use anyhow::{Context, Result};
@@ -275,10 +276,18 @@ fn spawn_cargo_expand(root: &Path, extra_args: &[&str]) -> Result<String> {
             return Ok(String::from_utf8_lossy(&stdout).into_owned());
         }
         if start.elapsed() > MACRO_EXPAND_TIMEOUT {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = join_pipe(stdout_reader);
-            let _ = join_pipe(stderr_reader);
+            if let Err(e) = child.kill() {
+                debug_log!("macro-expand: kill after timeout: {e}");
+            }
+            if let Err(e) = child.wait() {
+                debug_log!("macro-expand: wait after kill: {e}");
+            }
+            if let Err(e) = join_pipe(stdout_reader) {
+                debug_log!("macro-expand: draining stdout reader: {e:#}");
+            }
+            if let Err(e) = join_pipe(stderr_reader) {
+                debug_log!("macro-expand: draining stderr reader: {e:#}");
+            }
             anyhow::bail!(
                 "cargo expand did not finish within {:?}",
                 MACRO_EXPAND_TIMEOUT

@@ -16,6 +16,11 @@
 //! gating (fail CI if p50 exceeds baseline + 20%) is a follow-up
 //! once we have a stable baseline committed to the repo.
 
+// Benches are not compiled with `cfg(test)`, so clippy.toml's
+// allow-unwrap-in-tests exemption doesn't reach them; panicking on a
+// broken fixture is the right behavior here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use cargo_impact::{Finding, FindingKind, Format, Location, Tier, render_with_budget};
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::fs;
