@@ -31,7 +31,7 @@ jobs:
             ext: .exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
@@ -74,7 +74,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -109,7 +109,7 @@ jobs:
             echo "::notice::CRATES_IO_TOKEN not set — skipping crates.io publish."
             echo "::notice::Set it with \`gh secret set CRATES_IO_TOKEN\` to enable."
           fi
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         if: steps.check.outputs.skip != 'true'
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         if: steps.check.outputs.skip != 'true'
